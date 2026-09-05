@@ -23,8 +23,8 @@ if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile
 const manager = new ThreadManager(settings);
 manager.loadProjects(kanbanFixtureProjects);
 const agentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === kanbanRunningThreadId);
-if (agentFixtureThread) {
-  agentFixtureThread.agentRuns = Array.from({ length: dashboardMode ? 7 : 2 }, (_, index) => ({
+if (dashboardMode && agentFixtureThread) {
+  agentFixtureThread.agentRuns = Array.from({ length: 7 }, (_, index) => ({
     id: `dashboard-agent-${index}`,
     threadId: agentFixtureThread.id,
     nativeAgentId: `native-${index}`,
@@ -37,22 +37,6 @@ if (agentFixtureThread) {
     capabilities: { viewTranscript: true, sendMessage: true, interrupt: true },
     events: [],
   }));
-}
-const terminalAgentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === 'k-hiptrip-done');
-if (terminalAgentFixtureThread) {
-  terminalAgentFixtureThread.agentRuns = [{
-    id: 'terminal-dashboard-agent',
-    threadId: terminalAgentFixtureThread.id,
-    nativeAgentId: 'terminal-native-agent',
-    harness: 'claude' as const,
-    role: 'reviewer',
-    description: 'Completed review',
-    status: 'completed' as const,
-    startedAt: Date.now() - 20_000,
-    updatedAt: Date.now() - 10_000,
-    capabilities: { viewTranscript: true, sendMessage: true, interrupt: true },
-    events: [],
-  }];
 }
 if (dashboardMode) {
   const planFixtureThread = kanbanFixtureThreads.find(thread => thread.title.includes('Going too?'));
@@ -67,7 +51,7 @@ manager.loadThreads(kanbanFixtureThreads);
 // Restore intentionally marks persisted non-terminal runs unavailable. Turn this
 // deterministic fixture back into a live run after hydration.
 const liveFixtureRun = manager.getAgentRuns(kanbanRunningThreadId)[0];
-if (liveFixtureRun) liveFixtureRun.status = 'working';
+if (dashboardMode && liveFixtureRun) liveFixtureRun.status = 'working';
 
 // Running / Awaiting state lives in the manager's private session & permission
 // maps, not on the Thread. Seed them directly so the Working and Awaiting

@@ -2102,6 +2102,10 @@ test.describe('Agent Threads UI', () => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
     await page.waitForSelector('.ct-kanban-board');
+    await page.evaluate(() => {
+      (window as any).__replaceAgentRuns('k-hiptrip-running', ['working', 'completed']);
+      (window as any).__replaceAgentRuns('k-hiptrip-done', ['completed']);
+    });
 
     const activeCard = page.locator('.ct-kanban-card').filter({ hasText: 'Add "why this place" provenance layer' });
     const terminalCard = page.locator('.ct-kanban-card').filter({ hasText: 'Fix auth middleware 401s' });
@@ -2305,6 +2309,7 @@ test.describe('Agent Threads UI', () => {
     await expect(normalRow.locator('.ct-agents-row-secondary .ct-agents-row-activity')).toBeVisible();
     await expect(normalRow.locator('.ct-agents-row-secondary .ct-agents-row-cwd')).toBeVisible();
 
+    await page.evaluate(() => (window as any).__replaceAgentRuns('k-hiptrip-done', ['completed']));
     await expect(hiptrip.locator('.ct-dashboard-agent-count')).toHaveCount(2);
     const runningRow = hiptrip.locator('.ct-agents-row').filter({ hasText: 'Add "why this place" provenance layer' });
     await expect(runningRow.locator('.ct-dashboard-agent-count')).toHaveText('7 agents');
