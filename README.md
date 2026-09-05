@@ -206,7 +206,7 @@ Geode's ArtifactView previews the result with live reload, desktop/tablet/mobile
 
 ### Skills Manager
 
-Open the **Skills Manager** panel from the ribbon (puzzle icon) or command palette to browse, install, and edit Claude Code skills. The list and detail panels are split by a **draggable divider** — drag it to resize, double-click to reset to the default width; your chosen width is remembered next time you open the panel.
+Open the **Skills Manager** from the ribbon (puzzle icon) or command palette to browse, install, and edit Claude Code skills. New views open in a main document tab; if Skills Manager is already open, it is focused without moving it or discarding edits. The list and detail panels are split by a **draggable divider** — drag it to resize, double-click to reset to the default width; your chosen width is remembered next time you open the view.
 
 <p align="center">
   <img src="docs/screenshot-skills-manager.png" width="800" alt="Skills Manager: source tree on the left with skill/agent detail and editor on the right" />
