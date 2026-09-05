@@ -201,12 +201,14 @@ describe('ThreadSession — push-channel content shape', () => {
     await session.start({
       ...baseOptions(minimalCallbacks()),
       resume: 'durable-claude-session',
-      appendSystemPrompt: '## Active Goal\nShip the release',
+      appendSystemPrompt: 'Vault root (filesystem path): /vault\nWorking directory: /tmp\n\n## Active Goal\nShip the release',
     });
 
     expect(sdk.generations[0].options).toMatchObject({
       resume: 'durable-claude-session',
-      extraArgs: { 'append-system-prompt': '## Active Goal\nShip the release' },
+      extraArgs: {
+        'append-system-prompt': 'Vault root (filesystem path): /vault\nWorking directory: /tmp\n\n## Active Goal\nShip the release',
+      },
     });
     session.close();
   });

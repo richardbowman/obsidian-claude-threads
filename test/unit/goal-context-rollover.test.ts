@@ -82,6 +82,21 @@ beforeEach(() => {
 });
 
 describe.each(['claude', 'codex'] as const)('goal context rollover — %s', (harness) => {
+  it('includes the absolute vault root in the shared session prompt', async () => {
+    const manager = new ThreadManager({ ...DEFAULT_SETTINGS, agentHarness: harness });
+    manager.vaultRoot = '/vault';
+    const thread = manager.createThread('T', process.cwd(), undefined, harness);
+
+    await manager.sendMessage(thread.id, 'hello');
+
+    const prompt = (mock.sessions[0] as FakeSession).starts[0].appendSystemPrompt;
+    expect(prompt).toContain('Vault root (filesystem path): /vault');
+    expect(prompt).toContain(`Working directory: ${process.cwd()}`);
+    expect(prompt).not.toContain(`Vault root (filesystem path): ${process.cwd()}`);
+    (mock.sessions[0] as FakeSession).finish();
+    await settle();
+  });
+
   it('retires an idle adapter, resumes the same session id, applies the new prompt, and sends one kickoff', async () => {
     const manager = new ThreadManager({ ...DEFAULT_SETTINGS, agentHarness: harness });
     const thread = manager.createThread('T', process.cwd(), undefined, harness);

@@ -37,14 +37,15 @@ describe('codexMcpServers', () => {
 describe('Codex agent profile instructions', () => {
   it('replaces goal developer instructions on both thread start and thread resume', () => {
     const refreshed = {
-      appendSystemPrompt: '## Active Goal\nShip the latest release',
+      appendSystemPrompt: 'Vault root (filesystem path): /vault\nWorking directory: /work\n\n## Active Goal\nShip the latest release',
       codex: { approvalPolicy: 'on-request', sandbox: 'workspace-write' },
     } as any;
 
     expect(codexDeveloperInstructions(refreshed)).toContain('Ship the latest release');
+    expect(codexDeveloperInstructions(refreshed)).toContain('Vault root (filesystem path): /vault');
     expect(codexDeveloperInstructions(refreshed)).not.toContain('Old goal');
     expect(codexResumeInstructions(refreshed)).toEqual({
-      developerInstructions: '## Active Goal\nShip the latest release',
+      developerInstructions: 'Vault root (filesystem path): /vault\nWorking directory: /work\n\n## Active Goal\nShip the latest release',
     });
   });
 
