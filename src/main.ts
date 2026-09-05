@@ -2238,7 +2238,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(SKILLS_VIEW_TYPE)[0];
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) as WorkspaceLeaf;
+      leaf = workspace.getLeaf('tab') as WorkspaceLeaf;
       await leaf.setViewState({ type: SKILLS_VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);

@@ -1446,7 +1446,7 @@ test.describe('Agent Threads UI', () => {
 
   test('skills manager — installed tab', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
-    await page.setViewportSize({ width: 640, height: 700 });
+    await page.setViewportSize({ width: 1000, height: 740 });
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-count');
     await page.waitForTimeout(200);
@@ -1459,7 +1459,7 @@ test.describe('Agent Threads UI', () => {
 
   test('skills manager — Claude Code skill detail is read-only', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
-    await page.setViewportSize({ width: 640, height: 700 });
+    await page.setViewportSize({ width: 1000, height: 740 });
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-count');
     // 'brain-dump' lives in the ~/.claude/skills fixture.
@@ -1476,7 +1476,7 @@ test.describe('Agent Threads UI', () => {
 
   test('skills manager — vault skill detail is editable', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
-    await page.setViewportSize({ width: 640, height: 700 });
+    await page.setViewportSize({ width: 1000, height: 740 });
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-count');
     // 'release-manager' lives in the vault skills fixture.
@@ -1492,7 +1492,7 @@ test.describe('Agent Threads UI', () => {
 
   test('skills manager — agent detail is read-only', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
-    await page.setViewportSize({ width: 640, height: 700 });
+    await page.setViewportSize({ width: 1000, height: 740 });
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-count');
     await page.locator('.ct-skills-tree-child-name', { hasText: 'engineer' }).click();
@@ -1505,7 +1505,7 @@ test.describe('Agent Threads UI', () => {
 
   test('skills manager — browse tab', async ({ page }) => {
     const skillsUrl = 'file://' + path.resolve('test/harness/skills.html');
-    await page.setViewportSize({ width: 640, height: 700 });
+    await page.setViewportSize({ width: 1000, height: 740 });
     await page.goto(skillsUrl);
     await page.waitForSelector('.ct-skills-tabs');
     await page.getByText('Browse').click();
