@@ -4,6 +4,36 @@ import { anchorFocusedComposerToBottom, shot } from './helpers';
 
 const harnessUrl = 'file://' + path.resolve('test/harness/index.html');
 
+for (const theme of ['dark', 'light']) {
+  test(`agent list selection remains visible with low-contrast ${theme} theme`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
+    await page.goto('file://' + path.resolve('test/harness/kanban.html') + '?dashboard=1');
+    await page.waitForSelector('.ct-agents-row');
+    await page.evaluate((theme) => {
+      const app = document.querySelector<HTMLElement>('#app')!;
+      app.style.width = '320px';
+      app.style.height = '700px';
+      // Some host themes omit this token; others make it indistinguishable
+      // from the normal background. Selection must remain recognizable.
+      document.body.style.setProperty('--background-modifier-active-hover', 'transparent');
+      if (theme === 'light') {
+        document.body.style.setProperty('--background-primary', '#f6f5f0');
+        document.body.style.setProperty('--background-secondary', '#eeede8');
+        document.body.style.setProperty('--text-normal', '#303030');
+        document.body.style.setProperty('--text-muted', '#666');
+        document.body.style.setProperty('--interactive-accent', '#b7791f');
+      }
+      const dashboard = (window as any).__dashboard;
+      const ids = [...dashboard.rowEls.keys()];
+      dashboard.setActiveRow(ids[1]);
+      dashboard.setActiveRow(ids[0]);
+    }, theme);
+    await expect(page.locator('.ct-agents-row-active')).toHaveCount(1);
+    await page.locator('.ct-agents-row-active').hover();
+    await shot(page.locator('#app'), `agent-list-selected-${theme}.png`);
+  });
+}
+
 test.describe('Agent Threads UI', () => {
   // Pin Date.now()/new Date() to the fixture epoch (test/harness/fixtures.ts)
   // so relative labels ("5m ago", "Last active …") and same-day timestamp
