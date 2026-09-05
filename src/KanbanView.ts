@@ -1068,7 +1068,8 @@ export class KanbanView extends ItemView {
 
   /** Create, update, or remove a card's agent count without rebuilding the card. */
   private applyAgentCount(cardHeader: HTMLElement, threadId: string): void {
-    const runs = this.manager.getAgentRuns(threadId);
+    // Some lightweight view adapters omit agent APIs; treat those as no runs.
+    const runs = this.manager.getAgentRuns?.(threadId) ?? [];
     const existing = cardHeader.querySelector<HTMLElement>('.ct-kanban-agent-count');
     if (runs.length === 0) {
       existing?.remove();
