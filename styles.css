@@ -2851,6 +2851,14 @@
   background: var(--background-modifier-active-hover);
 }
 
+/* Keep selection visible even when the theme's active/hover colors match.
+   The trailing accent leaves the leading attention/status borders intact. */
+.ct-agents-row.ct-agents-row-active,
+.ct-agents-row.ct-agents-row-active:hover {
+  background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-primary));
+  box-shadow: inset -3px 0 0 var(--interactive-accent);
+}
+
 .ct-agents-icon {
   flex-shrink: 0;
   width: 18px;

@@ -140,6 +140,8 @@ Tabs are renamed automatically once the first turn completes, using the thread s
 
 ### Sending messages
 
+In the Agents List, the selected thread has an accent-tinted background and a trailing accent bar. Leading status and attention indicators remain visible alongside the selection.
+
 - **Enter** — send message
 - **Shift+Enter** — newline
 - **`/`** — opens slash command autocomplete
