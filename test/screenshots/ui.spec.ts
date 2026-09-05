@@ -2098,6 +2098,30 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'kanban-status.png', { fullPage: true });
   });
 
+  test('kanban agent count reflects live activity and patches in place', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 820 });
+    await page.goto(kanbanUrl);
+    await page.waitForSelector('.ct-kanban-board');
+
+    const activeCard = page.locator('.ct-kanban-card').filter({ hasText: 'Add "why this place" provenance layer' });
+    const terminalCard = page.locator('.ct-kanban-card').filter({ hasText: 'Fix auth middleware 401s' });
+    const activeCount = activeCard.locator('.ct-kanban-agent-count');
+    await expect(activeCount).toHaveClass(/ct-agent-count-active/);
+    await expect(activeCount).toHaveCSS('color', 'rgb(76, 175, 80)');
+    await expect(terminalCard.locator('.ct-kanban-agent-count')).not.toHaveClass(/ct-agent-count-active/);
+    await expect(terminalCard.locator('.ct-kanban-agent-count')).toHaveCSS('color', 'rgb(85, 85, 85)');
+
+    await activeCount.evaluate(el => el.setAttribute('data-patch-sentinel', 'same-node'));
+    await page.evaluate(() => (window as any).__replaceAgentRuns('k-hiptrip-running', ['completed', 'failed']));
+    await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveAttribute('data-patch-sentinel', 'same-node');
+    await expect(activeCard.locator('.ct-kanban-agent-count')).not.toHaveClass(/ct-agent-count-active/);
+
+    await page.evaluate(() => (window as any).__replaceAgentRuns('k-hiptrip-running', []));
+    await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveCount(0);
+    await page.evaluate(() => (window as any).__replaceAgentRuns('k-hiptrip-running', ['waiting']));
+    await expect(activeCard.locator('.ct-kanban-agent-count')).toHaveClass(/ct-agent-count-active/);
+  });
+
   test('kanban kickoff harness picker selects without dispatching', async ({ page }) => {
     await page.setViewportSize({ width: 1240, height: 820 });
     await page.goto(kanbanUrl);
@@ -2281,11 +2305,16 @@ test.describe('Agent Threads UI', () => {
     await expect(normalRow.locator('.ct-agents-row-secondary .ct-agents-row-activity')).toBeVisible();
     await expect(normalRow.locator('.ct-agents-row-secondary .ct-agents-row-cwd')).toBeVisible();
 
-    await expect(hiptrip.locator('.ct-dashboard-agent-count')).toHaveCount(1);
-    await expect(hiptrip.locator('.ct-dashboard-agent-count')).toHaveText('7 agents');
+    await expect(hiptrip.locator('.ct-dashboard-agent-count')).toHaveCount(2);
+    const runningRow = hiptrip.locator('.ct-agents-row').filter({ hasText: 'Add "why this place" provenance layer' });
+    await expect(runningRow.locator('.ct-dashboard-agent-count')).toHaveText('7 agents');
+    await expect(runningRow.locator('.ct-dashboard-agent-count')).toHaveClass(/ct-agent-count-active/);
+    const completedRow = hiptrip.locator('.ct-agents-row').filter({ hasText: 'Fix auth middleware 401s' });
+    await expect(completedRow.locator('.ct-dashboard-agent-count')).not.toHaveClass(/ct-agent-count-active/);
+    await expect(completedRow.locator('.ct-dashboard-agent-count')).toHaveCSS('color', 'rgb(85, 85, 85)');
     await expect(hiptrip.locator('.ct-dashboard-agent')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__manager.getSelectedAgentRun('k-hiptrip-running'))).toBeUndefined();
-    await hiptrip.locator('.ct-dashboard-agent-count').click();
+    await runningRow.locator('.ct-dashboard-agent-count').click();
     expect(await page.evaluate(() => (window as any).__manager.getSelectedAgentRun('k-hiptrip-running'))).toBeUndefined();
     expect(await page.evaluate(() => (window as any).__openedAgentTeams)).toEqual(['k-hiptrip-running']);
 

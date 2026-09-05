@@ -16,6 +16,7 @@ import { telemetry } from './telemetry';
 import { handleDesignDispatch } from './designDispatchRouting';
 import { attachStackArchiveMenu, attachThreadArchiveMenu, type ArchiveMenuDeps } from './threadArchiveMenu';
 import { promptConfirm } from './confirmModal';
+import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 
@@ -916,8 +917,7 @@ export class KanbanView extends ItemView {
     }
     const cardTitleEl = cardHeader.createDiv({ cls: 'ct-kanban-card-title', text: thread.title });
     appendOrchestratorBadge(cardTitleEl, thread.id, this.plugin.settings.orchestratorThreadId, thread.projectId ? this.manager.getProject(thread.projectId)?.orchestratorThreadId : undefined);
-    const agentCount = this.manager.getAgentRuns?.(thread.id).length ?? 0;
-    if (agentCount) cardHeader.createDiv({ cls: 'ct-kanban-agent-count', text: `◉ ${agentCount}`, attr: { title: `${agentCount} native agent${agentCount === 1 ? '' : 's'}` } });
+    this.applyAgentCount(cardHeader, thread.id);
 
     // Summary (idle threads only). Always created for idle cards — kept hidden
     // (display:none via ct-hidden) when empty — so a later `summary_updated`
@@ -1066,6 +1066,21 @@ export class KanbanView extends ItemView {
     }
   }
 
+  /** Create, update, or remove a card's agent count without rebuilding the card. */
+  private applyAgentCount(cardHeader: HTMLElement, threadId: string): void {
+    const runs = this.manager.getAgentRuns(threadId);
+    const existing = cardHeader.querySelector<HTMLElement>('.ct-kanban-agent-count');
+    if (runs.length === 0) {
+      existing?.remove();
+      return;
+    }
+
+    const countEl = existing ?? cardHeader.createDiv('ct-kanban-agent-count');
+    countEl.setText(`◉ ${runs.length}`);
+    countEl.setAttribute('title', `${runs.length} native agent${runs.length === 1 ? '' : 's'}`);
+    countEl.toggleClass('ct-agent-count-active', runs.some(run => ACTIVE_AGENT_STATUSES.has(run.status)));
+  }
+
   /**
    * Computes the column placement a thread WOULD render into right now — the
    * same combined bucket+group `scopeKey` and RowState used at render time — so
@@ -1111,6 +1126,9 @@ export class KanbanView extends ItemView {
 
     const activityEl = this.activityEls.get(threadId);
     if (activityEl) activityEl.setText(this.getActivityText(thread, state));
+
+    const cardHeader = card.querySelector<HTMLElement>('.ct-kanban-card-header');
+    if (cardHeader) this.applyAgentCount(cardHeader, threadId);
 
     if (state === 'idle') {
       const summaryEl = this.summaryEls.get(threadId);

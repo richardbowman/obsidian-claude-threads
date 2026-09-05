@@ -10,7 +10,7 @@ import { DISPATCH_BUILTIN_COMMANDS, DISPATCH_ARG_COMPLETIONS, parseDispatchDirec
 import { partitionScheduledStacks, type ScheduledStack } from './scheduledStacks';
 import { appendOrchestratorBadge } from './orchestrator-badge';
 import { partitionThreads } from './threadRowState';
-import { ACTIVE_AGENT_STATUSES, flattenAgentTree } from './agentRuns/agentTreeModel';
+import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 import { handleDesignDispatch } from './designDispatchRouting';
 import { resolveGitRepoRoot, resolveThreadProjectName } from './pathUtils';
 import { parsePrUrlRepo } from './gitDiffUtils';
@@ -729,10 +729,9 @@ export class AgentDashboard extends ItemView {
 
     const agentRuns = this.manager.getAgentRuns(thread.id);
     if (agentRuns.length) {
-      const flattened = flattenAgentTree(agentRuns);
-      const active = flattened.find(({ run }) => ACTIVE_AGENT_STATUSES.has(run.status));
+      const hasActiveAgent = agentRuns.some(run => ACTIVE_AGENT_STATUSES.has(run.status));
       const button = secondary.createEl('button', {
-        cls: `ct-dashboard-agent-count${active ? ` ct-agent-${active.run.status}` : ''}`,
+        cls: `ct-dashboard-agent-count${hasActiveAgent ? ' ct-agent-count-active' : ''}`,
         attr: { 'aria-label': `Open ${agentRuns.length} agent${agentRuns.length === 1 ? '' : 's'} in ${thread.title}` },
       });
       const icon = button.createSpan({ cls: 'ct-dashboard-agent-count-icon' });

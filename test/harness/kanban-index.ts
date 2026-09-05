@@ -23,20 +23,36 @@ if (new URLSearchParams(window.location.search).has('mobile')) Platform.isMobile
 const manager = new ThreadManager(settings);
 manager.loadProjects(kanbanFixtureProjects);
 const agentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === kanbanRunningThreadId);
-if (dashboardMode && agentFixtureThread) {
-  agentFixtureThread.agentRuns = Array.from({ length: 7 }, (_, index) => ({
+if (agentFixtureThread) {
+  agentFixtureThread.agentRuns = Array.from({ length: dashboardMode ? 7 : 2 }, (_, index) => ({
     id: `dashboard-agent-${index}`,
     threadId: agentFixtureThread.id,
     nativeAgentId: `native-${index}`,
     harness: 'claude' as const,
     role: 'engineer',
     description: `Sub-agent ${index + 1}`,
-    status: index < 2 ? 'working' as const : 'completed' as const,
+    status: index === 0 ? 'working' as const : 'completed' as const,
     startedAt: Date.now() - 10_000,
     updatedAt: Date.now(),
     capabilities: { viewTranscript: true, sendMessage: true, interrupt: true },
     events: [],
   }));
+}
+const terminalAgentFixtureThread = kanbanFixtureThreads.find(thread => thread.id === 'k-hiptrip-done');
+if (terminalAgentFixtureThread) {
+  terminalAgentFixtureThread.agentRuns = [{
+    id: 'terminal-dashboard-agent',
+    threadId: terminalAgentFixtureThread.id,
+    nativeAgentId: 'terminal-native-agent',
+    harness: 'claude' as const,
+    role: 'reviewer',
+    description: 'Completed review',
+    status: 'completed' as const,
+    startedAt: Date.now() - 20_000,
+    updatedAt: Date.now() - 10_000,
+    capabilities: { viewTranscript: true, sendMessage: true, interrupt: true },
+    events: [],
+  }];
 }
 if (dashboardMode) {
   const planFixtureThread = kanbanFixtureThreads.find(thread => thread.title.includes('Going too?'));
@@ -48,6 +64,10 @@ if (dashboardMode) {
   }];
 }
 manager.loadThreads(kanbanFixtureThreads);
+// Restore intentionally marks persisted non-terminal runs unavailable. Turn this
+// deterministic fixture back into a live run after hydration.
+const liveFixtureRun = manager.getAgentRuns(kanbanRunningThreadId)[0];
+if (liveFixtureRun) liveFixtureRun.status = 'working';
 
 // Running / Awaiting state lives in the manager's private session & permission
 // maps, not on the Thread. Seed them directly so the Working and Awaiting
@@ -129,6 +149,30 @@ void view.onOpen();
 (window as any).__getSaveSettingsCalls = () => saveSettingsCalls;
 (window as any).__getAgentsGroupBy = () => settings.agentsGroupBy;
 (window as any).__getHeaderUpdateCalls = getHeaderUpdateCalls;
+(window as any).__replaceAgentRuns = (threadId: string, statuses: Array<'starting' | 'working' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'unavailable'>) => {
+  const store = manager.agentRuns as unknown as { runs: Map<string, { threadId: string }> };
+  for (const [id, run] of store.runs) {
+    if (run.threadId === threadId) store.runs.delete(id);
+  }
+  const thread = manager.getThread(threadId);
+  if (!thread) return;
+  const runs = statuses.map((status, index) => ({
+    id: `replacement-agent-${threadId}-${index}`,
+    threadId,
+    nativeAgentId: `replacement-native-${index}`,
+    harness: 'claude' as const,
+    description: `Replacement agent ${index + 1}`,
+    status,
+    startedAt: Date.now() - 10_000,
+    updatedAt: Date.now(),
+    capabilities: { viewTranscript: true, sendMessage: true, interrupt: true },
+    events: [],
+  }));
+  manager.agentRuns.restore(threadId, runs);
+  manager.getAgentRuns(threadId).forEach((run, index) => { run.status = statuses[index]; });
+  (manager as unknown as { emit(threadId: string, event: { type: string; agentRuns: unknown[] }): void })
+    .emit(threadId, { type: 'agent_runs_changed', agentRuns: manager.getAgentRuns(threadId) });
+};
 (window as any).__setGroupBy = (mode: 'status' | 'folder' | 'project') => {
   if (dashboardMode) return;
   settings.kanbanGroupBy = mode;
