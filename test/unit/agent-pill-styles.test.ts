@@ -4,6 +4,7 @@ import path from 'path';
 
 const css = fs.readFileSync(path.resolve('styles.css'), 'utf8');
 const dashboardSource = fs.readFileSync(path.resolve('src/AgentDashboard.ts'), 'utf8');
+const kanbanSource = fs.readFileSync(path.resolve('src/KanbanView.ts'), 'utf8');
 
 /**
  * The agent pill is the only always-visible agent surface. It lives in
@@ -63,14 +64,29 @@ describe('agent touch targets', () => {
 });
 
 describe('dashboard agent count', () => {
-  it('uses the lightweight users icon and green text treatment instead of a boxed status dot', () => {
+  it('uses the lightweight users icon instead of a boxed status dot', () => {
     expect(dashboardSource).toMatch(/setIcon\([^,]+,\s*['"]users['"]\)/);
     expect(dashboardSource).not.toMatch(/button\.createSpan\(\{ cls: ['"]ct-agent-status-dot['"] \}\)/);
 
     const rule = css.match(/\.ct-dashboard-agent-count\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(rule).toMatch(/color:\s*var\(--color-green/);
+    expect(rule).toMatch(/color:\s*var\(--text-faint\)/);
     expect(rule).toMatch(/background:\s*transparent/);
     expect(rule).toMatch(/border:\s*(?:0|none)/);
+  });
+
+  it('uses a shared active modifier for dashboard rows and kanban cards', () => {
+    const activeRule = css.match(/\.ct-agent-count-active\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(activeRule).toMatch(/color:\s*var\(--color-green/);
+    expect(dashboardSource).toContain('ct-agent-count-active');
+    expect(kanbanSource).toContain('ct-agent-count-active');
+
+    const kanbanRule = css.match(/\.ct-kanban-agent-count\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(kanbanRule).toMatch(/color:\s*var\(--text-faint\)/);
+  });
+
+  it('patches kanban agent counts in place when agent runs change', () => {
+    expect(kanbanSource).toMatch(/private applyAgentCount\([^)]*\)/);
+    expect(kanbanSource).toMatch(/private patchCard[\s\S]*this\.applyAgentCount\(/);
   });
 });
 

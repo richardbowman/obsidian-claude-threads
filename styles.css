@@ -3000,13 +3000,13 @@
   padding: 2px 7px;
   white-space: nowrap;
   font-size: var(--font-ui-smaller);
-  color: var(--color-green, #4caf50);
+  color: var(--text-faint);
   background: transparent;
   border: none;
   border-radius: var(--radius-m);
 }
 .ct-dashboard-agent-count:hover,
-.ct-dashboard-agent-count:focus-visible { background: var(--background-modifier-hover); color: var(--color-green, #4caf50); }
+.ct-dashboard-agent-count:focus-visible { background: var(--background-modifier-hover); }
 .ct-dashboard-agent-count-icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -8406,7 +8406,8 @@ button.ct-agent-crumb:focus-visible {
 .ct-dashboard-agent { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; font-size: var(--font-ui-smaller); }
 .ct-dashboard-agent[aria-level="2"] { margin-left: 12px; }
 .ct-dashboard-agent[aria-level="3"] { margin-left: 24px; }
-.ct-kanban-agent-count { color: var(--text-muted); font-size: var(--font-ui-smaller); white-space: nowrap; }
+.ct-kanban-agent-count { color: var(--text-faint); font-size: var(--font-ui-smaller); white-space: nowrap; }
+.ct-agent-count-active { color: var(--color-green, #4caf50); }
 
 /* 44px tap targets are reserved for true mobile platforms, not narrow panes. */
 .ct-root.ct-mobile .ct-agent-row-button,
