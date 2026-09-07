@@ -561,7 +561,8 @@ export class AgentDashboard extends ItemView {
     const body = row.createDiv('ct-agents-row-body');
     const primary = body.createDiv('ct-agents-row-primary');
     const titleRow = primary.createDiv('ct-agents-stack-title-row');
-    titleRow.createSpan({ cls: 'ct-agents-row-title', text: stack.scheduledItemName });
+    const titleEl = titleRow.createDiv('ct-agents-row-title');
+    titleEl.createSpan({ cls: 'ct-agents-row-title-text', text: stack.scheduledItemName });
     titleRow.createSpan({ cls: 'ct-agents-group-badge ct-agents-stack-count', text: `×${stack.threads.length}` });
     primary.createDiv({ cls: 'ct-agents-row-time', text: relativeTime(stack.threads[0].updatedAt) });
     const secondary = body.createDiv('ct-agents-row-secondary');
