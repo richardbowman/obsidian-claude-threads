@@ -290,4 +290,12 @@ describe('RawLogWriter trace streaming', () => {
     const resumed = await makeWriter().readTraceChunk('boundary', { byteOffset: first!.nextByteOffset, eventIndex: first!.nextEventIndex, limit: 1 });
     expect(resumed?.startBoundaryHash).not.toBe(first?.nextBoundaryHash);
   });
+
+  it('closes the streaming file handle when a read throws', async () => {
+    const w = makeWriter(); w.append('close-error', undefined, 'assistant', { ok: true }); await settle(w);
+    const originalOpen = fs.promises.open.bind(fs.promises); const close = vi.fn(async () => {});
+    const open = vi.spyOn(fs.promises, 'open').mockImplementationOnce(originalOpen).mockResolvedValueOnce({ read: vi.fn(async () => { throw new Error('read failed'); }), close } as any);
+    await expect(w.readTraceChunk('close-error', { byteOffset: 0, eventIndex: 0, limit: 1 })).rejects.toThrow('read failed');
+    expect(close).toHaveBeenCalledOnce(); open.mockRestore();
+  });
 });

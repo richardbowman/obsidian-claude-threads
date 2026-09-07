@@ -225,6 +225,19 @@ describe('WikiSkill public API capabilities', () => {
     expect(terminal.skillRunOutcomes).toEqual([{ invokedSkill: 'integration-routing', runOutcome: 'success', invocationIndex: 3 }]);
   });
 
+  it('serializes concurrent projection advancement for the same source', async () => {
+    const entries = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'skill', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'skill' }] } } },
+      { ts: '3', type: 'result', event: { subtype: 'success', is_error: false } },
+    ];
+    const { service, getTraceMetadata } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Concurrent' });
+    const [one, two] = await Promise.all([service.api.traces.readChunk(threadId), service.api.traces.readChunk(threadId)]);
+    expect(one.events[2].skillRunOutcomes).toEqual(two.events[2].skillRunOutcomes);
+    expect(one.events[2].skillRunOutcomes).toHaveLength(1);
+    expect(getTraceMetadata.mock.calls.length).toBeLessThanOrEqual(6);
+  });
+
   it('redacts common local path forms in nested multiline trace strings', async () => {
     const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md /root/a /usr/bin/x /workspace/a /data/a /Library/a /Applications/a\ntwo C:\\Users\\rick\\secret.txt C:/bait/x \\\\server\\share\\x\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt https://example.com/public' }] } } }];
     const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Paths' });

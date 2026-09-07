@@ -208,6 +208,7 @@ export class RawLogWriter {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     const handle = await fs.promises.open(abs, 'r');
+    try {
     // A small byte-boundary fingerprint makes a cursor self-verifying across
     // process restarts without rereading the complete append-only source.
     const boundaryHash = async (offset: number): Promise<string> => {
@@ -239,7 +240,6 @@ export class RawLogWriter {
     if (position >= metadata.byteLength && pending.length && pending.length <= maxLineBytes) completeLines.push(pending);
     const currentMetadata = await this.getTraceMetadata(threadId);
     if (!currentMetadata || currentMetadata.revision !== metadata.revision) {
-      await handle.close();
       throw new RangeError('The trace source was replaced or truncated while it was being read.');
     }
 
@@ -259,7 +259,6 @@ export class RawLogWriter {
     if (position >= currentMetadata.byteLength) consumed = bytesRead;
     const nextByteOffset = options.byteOffset + consumed;
     const nextBoundaryHash = await boundaryHash(nextByteOffset);
-    await handle.close();
     return {
       metadata: currentMetadata,
       entries,
@@ -271,6 +270,9 @@ export class RawLogWriter {
       startBoundaryHash,
       nextBoundaryHash,
     };
+    } finally {
+      await handle.close();
+    }
   }
 
   /**

@@ -320,9 +320,13 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
   interface ProjectionState { revision: string; byteOffset: number; eventIndex: number; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; terminals: Map<number, readonly SkillRunOutcome[]> }
   const projectionStates = new Map<string, ProjectionState>();
-  const ensureProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
+  const projectionTails = new Map<string, Promise<ProjectionState>>();
+  const advanceProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
     let state = projectionStates.get(sourceId);
-    if (!state || state.revision !== revision || state.byteOffset > endByteOffset) { state = { revision, byteOffset: 0, eventIndex: 0, pending: new Map(), loaded: [], terminals: new Map() }; projectionStates.set(sourceId, state); }
+    if (!state || state.revision !== revision || state.byteOffset > endByteOffset) {
+      if (!state && projectionStates.size >= 100) projectionStates.delete(projectionStates.keys().next().value!);
+      state = { revision, byteOffset: 0, eventIndex: 0, pending: new Map(), loaded: [], terminals: new Map() }; projectionStates.set(sourceId, state);
+    } else { projectionStates.delete(sourceId); projectionStates.set(sourceId, state); }
     const registered = new Set(registeredNames);
     while (state.byteOffset < endByteOffset) {
       const page = await deps.readTraceChunk?.(sourceId, { byteOffset: state.byteOffset, eventIndex: state.eventIndex, limit: 500 });
@@ -342,12 +346,19 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
           const result = entry.event && typeof entry.event === 'object' ? entry.event as Record<string, unknown> : {};
           const runOutcome = result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const;
           state!.terminals.set(index, freeze(state!.loaded.map(item => freeze({ invokedSkill: item.skill, runOutcome, invocationIndex: item.index }))));
+          while (state!.terminals.size > 500) state!.terminals.delete(state!.terminals.keys().next().value!);
           state!.pending.clear(); state!.loaded = [];
         }
       });
       state.byteOffset = page.nextByteOffset; state.eventIndex = page.nextEventIndex;
     }
     return state;
+  };
+  const ensureProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
+    const waitForPrior: Promise<unknown> = projectionTails.get(sourceId)?.catch(() => undefined) ?? Promise.resolve();
+    const current = waitForPrior.then(() => advanceProjection(sourceId, revision, endByteOffset, registeredNames));
+    projectionTails.set(sourceId, current);
+    try { return await current; } finally { if (projectionTails.get(sourceId) === current) projectionTails.delete(sourceId); }
   };
   const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => {
     guard();
