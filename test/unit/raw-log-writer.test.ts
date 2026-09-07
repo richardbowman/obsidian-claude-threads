@@ -281,4 +281,13 @@ describe('RawLogWriter trace streaming', () => {
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('one', 'two'));
     expect((await makeWriter().getTraceMetadata('restart'))?.revision).not.toBe(initial?.revision);
   });
+
+  it('changes a restart-safe cursor boundary hash when preceding bytes are rewritten', async () => {
+    const file = path.join(tmpRoot, 'Claude', 'logs', 'boundary.jsonl'); fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lines = [...Array(20)].map((_, i) => JSON.stringify({ ts: '1', threadId: 'boundary', type: 'assistant', event: { i, pad: 'x'.repeat(300) } })); fs.writeFileSync(file, lines.join('\n') + '\n');
+    const first = await makeWriter().readTraceChunk('boundary', { byteOffset: 0, eventIndex: 0, limit: 15 });
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('"i":12', '"i":99'));
+    const resumed = await makeWriter().readTraceChunk('boundary', { byteOffset: first!.nextByteOffset, eventIndex: first!.nextEventIndex, limit: 1 });
+    expect(resumed?.startBoundaryHash).not.toBe(first?.nextBoundaryHash);
+  });
 });

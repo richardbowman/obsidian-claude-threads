@@ -118,14 +118,14 @@ function correlatedId(value: string | CorrelatedResource | undefined, expectedFi
   if (value.fingerprint !== expectedFingerprint) throw new ClaudeThreadsApiError('IDEMPOTENCY_CONFLICT', 'The idempotency key was already used with different input.');
   return value.resourceId;
 }
-function traceCursor(sourceId: string, revision: string, byteOffset: number, eventIndex: number): string { return `ct1:${btoa(JSON.stringify({ sourceId, revision, byteOffset, eventIndex }))}`; }
-function parseTraceCursor(value: string | undefined, sourceId: string, revision: string): { byteOffset: number; eventIndex: number } {
+function traceCursor(sourceId: string, revision: string, byteOffset: number, eventIndex: number, boundaryHash: string): string { return `ct1:${btoa(JSON.stringify({ sourceId, revision, byteOffset, eventIndex, boundaryHash }))}`; }
+function parseTraceCursor(value: string | undefined, sourceId: string, revision: string): { byteOffset: number; eventIndex: number; boundaryHash?: string } {
   if (!value) return { byteOffset: 0, eventIndex: 0 };
   try {
     if (!value.startsWith('ct1:')) throw new Error();
-    const decoded = JSON.parse(atob(value.slice(4))) as { sourceId: string; revision: string; byteOffset: number; eventIndex: number };
-    if (decoded.sourceId !== sourceId || decoded.revision !== revision || !Number.isInteger(decoded.byteOffset) || decoded.byteOffset < 0 || !Number.isInteger(decoded.eventIndex) || decoded.eventIndex < 0) throw new Error();
-    return { byteOffset: decoded.byteOffset, eventIndex: decoded.eventIndex };
+    const decoded = JSON.parse(atob(value.slice(4))) as { sourceId: string; revision: string; byteOffset: number; eventIndex: number; boundaryHash: string };
+    if (decoded.sourceId !== sourceId || decoded.revision !== revision || !Number.isInteger(decoded.byteOffset) || decoded.byteOffset < 0 || !Number.isInteger(decoded.eventIndex) || decoded.eventIndex < 0 || typeof decoded.boundaryHash !== 'string') throw new Error();
+    return { byteOffset: decoded.byteOffset, eventIndex: decoded.eventIndex, boundaryHash: decoded.boundaryHash };
   } catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); }
 }
 function sourcePageCursor(after: string): string { return `cts1:${btoa(JSON.stringify({ after }))}`; }
@@ -141,9 +141,9 @@ function positiveLimit(value: number | undefined, fallback: number): number {
 }
 const SENSITIVE_KEY = /(?:token|secret|password|authorization|cookie|rawlogpath|path)$/i;
 const SENSITIVE_VALUE = /\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s,;]+/gi;
-const LOCAL_PATH = /file:\/\/\/(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+|[A-Za-z]:\\[^\s"'<>]+|~[\\/][^\s"'<>]+|\/(?:Users|home|private|tmp|var|etc|opt|Volumes)\/[^\s"'<>]+/gi;
+const LOCAL_PATH = /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"'<>]+|~[\\/][^\s"'<>]+|(^|[\s([{=])(?:(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>]+|\/(?!\/)[^\s"'<>),;\]]+)/gim;
 function sanitize(value: unknown, secrets: readonly string[] = []): unknown {
-  if (typeof value === 'string') return secrets.filter(secret => secret.length >= 4).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value.replace(SENSITIVE_VALUE, '[REDACTED]').replace(LOCAL_PATH, '[PATH]'));
+  if (typeof value === 'string') return secrets.filter(secret => secret.length >= 4).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value.replace(SENSITIVE_VALUE, '[REDACTED]').replace(LOCAL_PATH, (_match, prefix = '') => `${prefix}[PATH]`));
   if (Array.isArray(value)) return value.map(item => sanitize(item, secrets));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !SENSITIVE_KEY.test(key)).map(([key, nested]) => [key, sanitize(nested, secrets)]));
   return value;
@@ -318,17 +318,36 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const next = start + page.length;
     return freeze({ sources, nextCursor: next < values.length && page.length ? sourcePageCursor(page.at(-1)!.id) : undefined, eof: next >= values.length });
   };
-  const terminalSkillOutcomes = async (sourceId: string, endByteOffset: number, terminalEventIndex: number, sessionId: string | undefined, registeredNames: readonly string[], runOutcome: 'success' | 'failure'): Promise<readonly SkillRunOutcome[]> => {
-    const entries: RawLogTraceChunk['entries'] = []; const sourceIndexes: number[] = []; let byteOffset = 0; let eventIndex = 0;
-    while (byteOffset < endByteOffset && entries.length < 10_000) {
-      const page = await deps.readTraceChunk?.(sourceId, { byteOffset, eventIndex, limit: Math.min(500, 10_000 - entries.length) });
-      if (!page || page.nextByteOffset <= byteOffset) break;
-      page.entries.forEach((entry, offset) => { const index = eventIndex + offset; if (index <= terminalEventIndex && (sessionId === undefined || entry.sessionId === sessionId)) { entries.push(entry); sourceIndexes.push(index); } });
-      byteOffset = page.nextByteOffset; eventIndex = page.nextEventIndex;
+  interface ProjectionState { revision: string; byteOffset: number; eventIndex: number; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; terminals: Map<number, readonly SkillRunOutcome[]> }
+  const projectionStates = new Map<string, ProjectionState>();
+  const ensureProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
+    let state = projectionStates.get(sourceId);
+    if (!state || state.revision !== revision || state.byteOffset > endByteOffset) { state = { revision, byteOffset: 0, eventIndex: 0, pending: new Map(), loaded: [], terminals: new Map() }; projectionStates.set(sourceId, state); }
+    const registered = new Set(registeredNames);
+    while (state.byteOffset < endByteOffset) {
+      const page = await deps.readTraceChunk?.(sourceId, { byteOffset: state.byteOffset, eventIndex: state.eventIndex, limit: 500 });
+      if (!page || page.nextByteOffset <= state.byteOffset) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source could not make forward progress.');
+      page.entries.forEach((entry, offset) => {
+        const index = state!.eventIndex + offset;
+        if (entry.type === 'session_start') { state!.pending.clear(); state!.loaded = []; }
+        for (const candidate of traceContent(entry.event)) {
+          if (!candidate || typeof candidate !== 'object') continue; const block = candidate as Record<string, unknown>;
+          if (block.type === 'tool_use' && block.name === 'Skill' && typeof block.id === 'string' && block.input && typeof block.input === 'object') {
+            const skill = (block.input as Record<string, unknown>).skill; if (typeof skill === 'string' && registered.has(skill.trim())) state!.pending.set(block.id, { skill: skill.trim(), index });
+          } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            const pending = state!.pending.get(block.tool_use_id); state!.pending.delete(block.tool_use_id); if (pending && block.is_error !== true) state!.loaded.push(pending);
+          }
+        }
+        if (entry.type === 'result') {
+          const result = entry.event && typeof entry.event === 'object' ? entry.event as Record<string, unknown> : {};
+          const runOutcome = result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const;
+          state!.terminals.set(index, freeze(state!.loaded.map(item => freeze({ invokedSkill: item.skill, runOutcome, invocationIndex: item.index }))));
+          state!.pending.clear(); state!.loaded = [];
+        }
+      });
+      state.byteOffset = page.nextByteOffset; state.eventIndex = page.nextEventIndex;
     }
-    if (byteOffset < endByteOffset) return [];
-    const verified = verifiedInvokedSkills(entries, registeredNames);
-    return freeze([...verified.skills.entries()].filter(([index]) => !verified.outcomes.has(index)).map(([index, invokedSkill]) => freeze({ invokedSkill, runOutcome, invocationIndex: sourceIndexes[index] })));
+    return state;
   };
   const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => {
     guard();
@@ -343,25 +362,20 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     catch (error) { if (error instanceof RangeError) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); throw error; }
     if (!raw) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.');
     if (raw.metadata.revision !== metadata.revision) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
+    if (position.boundaryHash !== undefined && raw.startBoundaryHash !== position.boundaryHash) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
     const lookahead = raw.eof ? null : await deps.readTraceChunk?.(sourceId, { byteOffset: raw.nextByteOffset, eventIndex: raw.nextEventIndex, limit: 32 }) ?? null;
     const attributionEntries = [...raw.entries, ...(lookahead?.entries ?? [])];
     const registeredNames = await deps.getRegisteredSkillNames?.() ?? [];
+    const projection = await ensureProjection(sourceId, metadata.revision, raw.nextByteOffset, registeredNames);
     const invokedSkills = verifiedInvokedSkills(attributionEntries, registeredNames);
     const secrets = deps.getRedactionSecrets?.() ?? [];
     const events = raw.entries.map((entry, offset) => {
       const type = String(entry.type ?? 'unknown');
       const invokedSkill = invokedSkills.skills.get(offset);
-      const result = entry.event && typeof entry.event === 'object' ? entry.event as Record<string, unknown> : {};
-      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillLoadOutcome: 'loaded' as const } : {}), ...((type === 'result') ? { skillRunOutcomes: [] as readonly SkillRunOutcome[], __terminal: { outcome: result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const, sessionId: entry.sessionId } } : {}), data: projectTraceData(type, entry.event, secrets) });
+      const index = position.eventIndex + offset;
+      return freeze({ index, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillLoadOutcome: 'loaded' as const } : {}), ...((type === 'result') ? { skillRunOutcomes: projection.terminals.get(index) ?? [] } : {}), data: projectTraceData(type, entry.event, secrets) });
     });
-    for (let offset = 0; offset < raw.entries.length; offset++) {
-      if (raw.entries[offset].type !== 'result') continue;
-      const event = events[offset] as TraceEvent & { __terminal?: { outcome: 'success' | 'failure'; sessionId?: string } };
-      const terminal = event.__terminal!;
-      const skillRunOutcomes = await terminalSkillOutcomes(sourceId, raw.nextByteOffset, event.index, terminal.sessionId, registeredNames, terminal.outcome);
-      events[offset] = freeze({ index: event.index, timestamp: event.timestamp, type: event.type, skillRunOutcomes, data: event.data });
-    }
-    return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });
+    return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex, raw.nextBoundaryHash), eof: raw.eof, events });
   };
   const settleConstrained = async (runId: string, result: ConstrainedRunResult): Promise<ConstrainedRunResult> => {
     const current = persisted.constrained[runId];

@@ -20,11 +20,12 @@ function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], reg
     { ts: '2026-01-01T00:00:03Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
   ];
   let traceRevision = 'revision-1';
+  let boundaryEpoch = 'one';
   const getTraceMetadata = vi.fn(async (id: string) => threads.has(id) ? ({ sourceId: id, revision: traceRevision, contentHash: 'a'.repeat(64), byteLength: rawEntries(id).length, updatedAt: 3 }) : null);
   const readTraceChunk = vi.fn(async (id: string, options: any) => {
     const entries = rawEntries(id).slice(options.byteOffset, options.byteOffset + options.limit);
     const nextByteOffset = options.byteOffset + entries.length;
-    return { metadata: await getTraceMetadata(id), entries, nextByteOffset, nextEventIndex: options.eventIndex + entries.length, eof: nextByteOffset >= rawEntries(id).length, bytesRead: entries.length, readCalls: 1 };
+    return { metadata: await getTraceMetadata(id), entries, nextByteOffset, nextEventIndex: options.eventIndex + entries.length, eof: nextByteOffset >= rawEntries(id).length, bytesRead: entries.length, readCalls: 1, startBoundaryHash: `${boundaryEpoch}-${options.byteOffset}`, nextBoundaryHash: `${boundaryEpoch}-${nextByteOffset}` };
   });
   const service = createClaudeThreadsApiV1({
     getThreads: () => [...threads.values()], getThread: (id) => threads.get(id), isRunning: (id) => threads.get(id)?.status === 'active',
@@ -35,7 +36,7 @@ function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], reg
     triggerHostEvent: () => {}, getTraceMetadata, readTraceChunk, getRegisteredSkillNames: async () => registeredSkills,
     getRedactionSecrets: () => ['api-xyz-123'], getPublicState: () => state, savePublicState: async (next) => { state = structuredClone(next); }, runConstrainedQuery: query,
   } as any);
-  return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; } };
+  return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; }, rewriteBeforeCursor: () => { boundaryEpoch = 'two'; } };
 }
 
 describe('WikiSkill public API capabilities', () => {
@@ -208,12 +209,29 @@ describe('WikiSkill public API capabilities', () => {
     expect(terminalChunk.events[0].skillRunOutcomes).toEqual([{ invokedSkill: 'integration-routing', runOutcome: expected, invocationIndex: 0 }]);
   });
 
+  it('segments outcomes at session boundaries across more than 10k events', async () => {
+    const entries: any[] = [
+      { ts: '0', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'old', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '1', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'old' }] } } },
+      { ts: '2', type: 'session_start', event: {} },
+      { ts: '3', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'current', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '4', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'current' }] } } },
+    ];
+    for (let i = 0; i < 10_001; i++) entries.push({ ts: String(i + 5), type: 'assistant', event: { message: { content: [{ type: 'text', text: 'bounded' }] } } });
+    entries.push({ ts: 'end', type: 'result', event: { subtype: 'success', is_error: false } });
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Long' });
+    let cursor: string | undefined; let terminal: any;
+    do { const page = await service.api.traces.readChunk(threadId, { cursor, limit: 500 }); cursor = page.nextCursor; terminal = page.events.find(event => event.type === 'result'); if (page.eof) break; } while (!terminal);
+    expect(terminal.skillRunOutcomes).toEqual([{ invokedSkill: 'integration-routing', runOutcome: 'success', invocationIndex: 3 }]);
+  });
+
   it('redacts common local path forms in nested multiline trace strings', async () => {
-    const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md\ntwo C:\\Users\\rick\\secret.txt\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt' }] } } }];
+    const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md /root/a /usr/bin/x /workspace/a /data/a /Library/a /Applications/a\ntwo C:\\Users\\rick\\secret.txt C:/bait/x \\\\server\\share\\x\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt https://example.com/public' }] } } }];
     const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Paths' });
     const json = JSON.stringify(await service.api.traces.readChunk(threadId));
-    for (const bait of ['/Users/rick', 'Users\\\\rick', '~/vault', 'file:///private']) expect(json).not.toContain(bait);
+    for (const bait of ['/Users/rick', '/root/a', '/usr/bin', '/workspace/a', '/data/a', '/Library/a', '/Applications/a', 'Users\\\\rick', 'C:/bait', 'server\\\\share', '~/vault', 'file:///private']) expect(json).not.toContain(bait);
     expect(json).toContain('[PATH]');
+    expect(json).toContain('https://example.com/public');
   });
 
   it('pages trace source metadata and validates finite positive limits', async () => {
@@ -247,6 +265,12 @@ describe('WikiSkill public API capabilities', () => {
     await expect(service.api.traces.readChunk(two.threadId, { cursor: chunk.nextCursor, limit: 1 })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
     setTraceRevision('revision-2');
     await expect(service.api.traces.readChunk(one.threadId, { cursor: chunk.nextCursor, limit: 1 })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
+  });
+
+  it('rejects a cursor when its byte-boundary fingerprint changes without a revision change', async () => {
+    const { service, rewriteBeforeCursor } = harness(); const { threadId } = await service.api.threads.create({ title: 'One' });
+    const chunk = await service.api.traces.readChunk(threadId, { limit: 1 }); rewriteBeforeCursor();
+    await expect(service.api.traces.readChunk(threadId, { cursor: chunk.nextCursor, limit: 1 })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
   });
 
   it('announces eligible trace changes with the source revision and fences WikiSkill-origin trace events', async () => {

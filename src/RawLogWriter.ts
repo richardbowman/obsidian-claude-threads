@@ -35,6 +35,8 @@ export interface RawLogTraceChunk {
   eof: boolean;
   bytesRead: number;
   readCalls: number;
+  startBoundaryHash: string;
+  nextBoundaryHash: string;
 }
 
 /**
@@ -206,11 +208,20 @@ export class RawLogWriter {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     const handle = await fs.promises.open(abs, 'r');
+    // A small byte-boundary fingerprint makes a cursor self-verifying across
+    // process restarts without rereading the complete append-only source.
+    const boundaryHash = async (offset: number): Promise<string> => {
+      const length = Math.min(4096, offset); const bytes = Buffer.alloc(length);
+      if (length) await handle.read(bytes, 0, length, offset - length);
+      return crypto.createHash('sha256').update(bytes).digest('hex');
+    };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('crypto') as typeof import('crypto');
+    const startBoundaryHash = await boundaryHash(options.byteOffset);
     const blockSize = 64 * 1024; const maxLineBytes = 1024 * 1024;
     let bytesRead = 0; let readCalls = 0; let position = options.byteOffset; let pending = Buffer.alloc(0); let done = false;
     const completeLines: Buffer[] = [];
-    try {
-      while (!done && position < metadata.byteLength && completeLines.length < options.limit) {
+    while (!done && position < metadata.byteLength && completeLines.length < options.limit) {
         const buffer = Buffer.alloc(Math.min(blockSize, metadata.byteLength - position));
         const read = await handle.read(buffer, 0, buffer.length, position); readCalls += 1; if (!read.bytesRead) break;
         bytesRead += read.bytesRead; position += read.bytesRead; pending = Buffer.concat([pending, buffer.subarray(0, read.bytesRead)]);
@@ -224,13 +235,11 @@ export class RawLogWriter {
           // Keep scanning without retaining an unbounded corrupt line.
           pending = Buffer.alloc(maxLineBytes + 1, 0x78);
         }
-      }
-      if (position >= metadata.byteLength && pending.length && pending.length <= maxLineBytes) completeLines.push(pending);
-    } finally {
-      await handle.close();
     }
+    if (position >= metadata.byteLength && pending.length && pending.length <= maxLineBytes) completeLines.push(pending);
     const currentMetadata = await this.getTraceMetadata(threadId);
     if (!currentMetadata || currentMetadata.revision !== metadata.revision) {
+      await handle.close();
       throw new RangeError('The trace source was replaced or truncated while it was being read.');
     }
 
@@ -249,6 +258,8 @@ export class RawLogWriter {
     }
     if (position >= currentMetadata.byteLength) consumed = bytesRead;
     const nextByteOffset = options.byteOffset + consumed;
+    const nextBoundaryHash = await boundaryHash(nextByteOffset);
+    await handle.close();
     return {
       metadata: currentMetadata,
       entries,
@@ -257,6 +268,8 @@ export class RawLogWriter {
       eof: nextByteOffset >= currentMetadata.byteLength,
       bytesRead,
       readCalls,
+      startBoundaryHash,
+      nextBoundaryHash,
     };
   }
 
