@@ -1,20 +1,21 @@
 import type { ChatMessage, Thread, ThreadStatus } from './types';
 import type { ThreadEvent } from './ThreadManager';
 
-export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
+export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
 export class ClaudeThreadsApiError extends Error implements PublicError {
   constructor(public readonly code: PublicErrorCode, message: string, public readonly generation?: string) { super(message); this.name = 'ClaudeThreadsApiError'; }
 }
 export interface MessageSnapshot { readonly id: string; readonly role: ChatMessage['role']; readonly content: string; readonly timestamp: number }
-export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: 'claude' | 'codex'; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
+export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
 export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
 export interface ThreadQuery { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }
-export interface CreateThreadInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: 'claude' | 'codex' }
-export interface SendInput { readonly prompt: string }
+export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
+export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: 'claude' | 'codex'; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export interface SendInput extends CorrelationInput { readonly prompt: string }
 export interface WaitOptions { readonly timeoutMs?: number }
 export type RunResult =
-  | { readonly status: 'completed'; readonly runId: string; readonly threadId: string; readonly finalMessage?: MessageSnapshot }
+  | { readonly status: 'completed'; readonly runId: string; readonly threadId: string; readonly finalMessage?: MessageSnapshot; readonly usage?: PublicUsage }
   | { readonly status: 'failed'; readonly runId: string; readonly threadId: string; readonly error: PublicError }
   | { readonly status: 'timed_out'; readonly runId: string; readonly threadId: string };
 export type PublicThreadEvent =
@@ -24,6 +25,20 @@ export type PublicThreadEvent =
   | { readonly kind: 'run.failed'; readonly threadId: string; readonly runId: string; readonly error: PublicError; readonly at: number }
   | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };
 export interface Disposable { dispose(): void }
+export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
+export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly updatedAt: number }
+export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly data: unknown }
+export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor?: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
+export type PublicTraceEvent = { readonly kind: 'trace.updated' | 'trace.removed'; readonly sourceId: string; readonly revision: string; readonly at: number };
+export interface ConstrainedRunInput extends CorrelationInput { readonly ownerPluginId: string; readonly idempotencyKey: string; readonly harness: 'claude'; readonly model: string; readonly systemInstructions: string; readonly prompt: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }
+export type ConstrainedRunResult =
+  | { readonly status: 'running'; readonly runId: string }
+  | { readonly status: 'completed'; readonly runId: string; readonly output: string; readonly model: string; readonly usage: PublicUsage }
+  | { readonly status: 'failed' | 'cancelled'; readonly runId: string; readonly error: PublicError };
+export type PersistedThreadRun = Exclude<RunResult, { status: 'timed_out' }> | { readonly status: 'running'; readonly runId: string; readonly threadId: string };
+export interface PublicApiPersistedState { readonly version: 1; readonly creates: Record<string, string>; readonly sends: Record<string, string>; readonly runs: Record<string, PersistedThreadRun>; readonly constrained: Record<string, ConstrainedRunResult>; readonly constrainedKeys: Record<string, string> }
+export interface ConstrainedQueryInput { readonly prompt: string; readonly options: { readonly model: string; readonly systemInstructions: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }; readonly signal: AbortSignal }
+export interface ConstrainedQueryOutput { readonly output: string; readonly usage: PublicUsage }
 export interface OrchestratorSnapshot { readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string }
 export interface OrchestratorTarget { readonly id: string }
 export interface AgentToolDefinition { readonly type: 'function'; readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> }
@@ -33,24 +48,88 @@ export interface ClaudeThreadsApiV1 {
   readonly threads: {
     list(query?: ThreadQuery): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>;
     create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>;
-    wait(runId: string, options?: WaitOptions): Promise<RunResult>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
+    wait(runId: string, options?: WaitOptions): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
   };
+  readonly traces: { listSources(): Promise<readonly TraceSource[]>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
+  readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
   readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: OrchestratorTarget, input: SendInput): Promise<{ readonly runId: string }> };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
 }
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
   sendMessage(id: string, prompt: string): Promise<void>; openThread(id: string): Promise<void>; subscribe(listener: (threadId: string, event: ThreadEvent) => void): () => void;
+  interruptThread?(id: string): Promise<void>; readRawLog?(id: string): Promise<{ total: number; entries: unknown[] } | null>;
+  getRedactionSecrets?(): readonly string[];
+  getPublicState?(): PublicApiPersistedState | undefined; savePublicState?(state: PublicApiPersistedState): Promise<void>;
+  runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
   listOrchestrators(): OrchestratorSnapshot[]; resolveOrchestrator(target: OrchestratorTarget): Promise<string | null>;
   triggerHostEvent(name: 'claude-threads:api-ready' | 'claude-threads:api-stopping', payload: { apiVersion: 1; generation: string }): void;
 }
 interface RunRecord { readonly runId: string; readonly threadId: string; result?: Exclude<RunResult, { status: 'timed_out' }>; waiters: Set<(result: Exclude<RunResult, { status: 'timed_out' }>) => void> }
 export interface ClaudeThreadsApiService { readonly api: ClaudeThreadsApiV1; start(): void; stop(): void }
 
-const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.open', 'threads.subscribe', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration']);
+const CAPABILITIES = Object.freeze(['threads.list', 'threads.get', 'threads.create', 'threads.send', 'threads.wait', 'threads.cancel', 'threads.open', 'threads.subscribe', 'traces.listSources', 'traces.readChunk', 'traces.subscribe', 'constrainedRuns.create', 'constrainedRuns.get', 'constrainedRuns.wait', 'constrainedRuns.cancel', 'orchestrators.list', 'orchestrators.dispatch', 'agentTools.voice-orchestration']);
 function freeze<T extends object>(value: T): Readonly<T> { for (const nested of Object.values(value)) if (nested && typeof nested === 'object' && !Object.isFrozen(nested)) freeze(nested as object); return Object.freeze(value); }
 function snapshotMessage(message: ChatMessage): MessageSnapshot { return freeze({ id: message.id, role: message.role, content: String(message.content), timestamp: message.timestamp }); }
-function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
+function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', origin: thread.origin, externalJobId: thread.externalJobId, ephemeral: thread.ephemeral, background: thread.background, createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
+const EMPTY_STATE = (): PublicApiPersistedState => ({ version: 1, creates: {}, sends: {}, runs: {}, constrained: {}, constrainedKeys: {} });
+const MAX_PERSISTED_RECORDS = 500;
+function trimRecord<T>(record: Record<string, T>): void { const keys = Object.keys(record); for (const key of keys.slice(0, Math.max(0, keys.length - MAX_PERSISTED_RECORDS))) delete record[key]; }
+function correlationKey(input: CorrelationInput): string | undefined { return input.ownerPluginId && input.idempotencyKey ? `${input.ownerPluginId}\u0000${input.idempotencyKey}` : undefined; }
+function traceRevision(thread: Thread): string { return `thread-${thread.createdAt.toString(36)}`; }
+function cursor(index: number, revision: string): string { return `ct1:${btoa(JSON.stringify({ index, revision }))}`; }
+function parseCursor(value: string | undefined, revision: string): number {
+  if (!value) return 0;
+  try { const decoded = JSON.parse(atob(value.replace(/^ct1:/, ''))) as { index: number; revision: string }; if (!Number.isInteger(decoded.index) || decoded.index < 0 || decoded.revision !== revision) throw new Error(); return decoded.index; }
+  catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); }
+}
+const SENSITIVE_KEY = /(?:token|secret|password|authorization|cookie|rawlogpath|path)$/i;
+const SENSITIVE_VALUE = /\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s,;]+/gi;
+function sanitize(value: unknown, secrets: readonly string[] = []): unknown {
+  if (typeof value === 'string') return secrets.filter(secret => secret.length >= 4).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value.replace(SENSITIVE_VALUE, '[REDACTED]'));
+  if (Array.isArray(value)) return value.map(item => sanitize(item, secrets));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !SENSITIVE_KEY.test(key)).map(([key, nested]) => [key, sanitize(nested, secrets)]));
+  return value;
+}
+function textBlocks(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(block => block && typeof block === 'object' && (block as Record<string, unknown>).type === 'text' && typeof (block as Record<string, unknown>).text === 'string' ? [(block as Record<string, unknown>).text as string] : []);
+}
+function projectTraceData(type: string, raw: unknown, secrets: readonly string[]): unknown {
+  const event = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : event;
+  if (type === 'assistant') {
+    const content = Array.isArray(message.content) ? message.content : [];
+    const tools = content.flatMap(block => block && typeof block === 'object' && (block as Record<string, unknown>).type === 'tool_use' && typeof (block as Record<string, unknown>).name === 'string' ? [(block as Record<string, unknown>).name as string] : []);
+    return sanitize({ text: textBlocks(message.content).join('\n'), tools, model: typeof message.model === 'string' ? message.model : undefined }, secrets);
+  }
+  if (type === 'user') return sanitize({ text: textBlocks(message.content ?? event.message).join('\n') }, secrets);
+  if (type === 'result') return sanitize({ subtype: event.subtype, durationMs: event.duration_ms, turns: event.num_turns, costUsd: event.total_cost_usd, usage: event.usage, modelUsage: event.modelUsage ?? event.model_usage, errors: event.is_error ? ['run_failed'] : undefined }, secrets);
+  if (type === 'tool_use_summary') return sanitize({ summary: event.summary }, secrets);
+  if (type === 'session_start') return sanitize({ harness: event.harness, model: event.model }, secrets);
+  return { kind: type };
+}
+function invokedSkillFromTrace(type: string, raw: unknown): string | undefined {
+  if (type !== 'assistant' || !raw || typeof raw !== 'object') return undefined;
+  const event = raw as Record<string, unknown>;
+  const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : undefined;
+  if (!message || !Array.isArray(message.content)) return undefined;
+  for (const candidate of message.content) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const block = candidate as Record<string, unknown>;
+    if (block.type !== 'tool_use' || block.name !== 'Skill' || !block.input || typeof block.input !== 'object') continue;
+    const skill = (block.input as Record<string, unknown>).skill;
+    if (typeof skill === 'string' && skill.trim()) return skill.trim();
+  }
+  return undefined;
+}
+async function traceContentHash(entries: readonly unknown[], secrets: readonly string[]): Promise<string> {
+  const projection = entries.map(item => { const entry = item as Record<string, unknown>; const type = String(entry.type ?? 'unknown'); return [type, invokedSkillFromTrace(type, entry.event), projectTraceData(type, entry.event, secrets)]; });
+  const bytes = new TextEncoder().encode(JSON.stringify(projection));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
 function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
 function boolProp(): Record<string, unknown> { return { type: 'boolean' }; }
@@ -68,31 +147,53 @@ const VOICE_TOOLS: readonly AgentToolDefinition[] = freeze([
 export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThreadsApiService {
   const generation = crypto.randomUUID();
   const listeners = new Set<(event: PublicThreadEvent) => void>(); const runs = new Map<string, RunRecord>();
+  const traceListeners = new Set<(event: PublicTraceEvent) => void>();
+  const eligibleTraceIds = new Set(deps.getThreads().filter(thread => !thread.origin).map(thread => thread.id));
+  const constrainedControllers = new Map<string, AbortController>();
+  const constrainedWaiters = new Map<string, Set<(result: ConstrainedRunResult) => void>>();
+  const persisted = structuredClone(deps.getPublicState?.() ?? EMPTY_STATE());
+  for (const [runId, stored] of Object.entries(persisted.runs)) {
+    const result = stored.status === 'running' ? freeze({ status: 'failed' as const, runId, threadId: stored.threadId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) }) : stored;
+    persisted.runs[runId] = result; runs.set(runId, { runId, threadId: stored.threadId, result, waiters: new Set() });
+  }
+  for (const [runId, stored] of Object.entries(persisted.constrained)) if (stored.status === 'running') persisted.constrained[runId] = freeze({ status: 'failed', runId, error: freeze({ code: 'RUN_INTERRUPTED' as const, message: 'The agent run was interrupted.' }) });
   const runIdsByThread = new Map<string, Set<string>>(); const latestRunByThread = new Map<string, string>();
   let active = true; let started = false; let stopped = false;
   const unavailable = () => new ClaudeThreadsApiError('PLUGIN_UNAVAILABLE', 'Agent Threads is not available.', generation);
   const guard = () => { if (!active) throw unavailable(); };
   const publish = (event: PublicThreadEvent) => { if (!active) return; const immutable = freeze(event); for (const listener of [...listeners]) { try { listener(immutable); } catch (error) { console.error('[ClaudeThreads] Public API listener failed:', error); } } };
   const publicFailure = (code: PublicErrorCode): PublicError => freeze({ code, message: code === 'PLUGIN_UNAVAILABLE' ? 'Agent Threads became unavailable.' : code === 'RUN_INTERRUPTED' ? 'The agent run was interrupted.' : 'The agent run failed.' });
-  const settle = (record: RunRecord, result: Exclude<RunResult, { status: 'timed_out' }>) => { if (record.result) return; record.result = freeze(result); for (const resolve of [...record.waiters]) resolve(record.result); record.waiters.clear(); runIdsByThread.get(record.threadId)?.delete(record.runId); };
+  const saveState = () => { trimRecord(persisted.creates); trimRecord(persisted.sends); trimRecord(persisted.runs); trimRecord(persisted.constrained); trimRecord(persisted.constrainedKeys); void deps.savePublicState?.(structuredClone(persisted)); };
+  const settle = (record: RunRecord, result: Exclude<RunResult, { status: 'timed_out' }>) => { if (record.result) return; record.result = freeze(result); persisted.runs[record.runId] = result; saveState(); for (const resolve of [...record.waiters]) resolve(record.result); record.waiters.clear(); runIdsByThread.get(record.threadId)?.delete(record.runId); };
   const activeRuns = (threadId: string) => [...(runIdsByThread.get(threadId) ?? [])].map(id => runs.get(id)).filter((record): record is RunRecord => !!record && !record.result);
   const lastAssistant = (threadId: string) => { const message = [...(deps.getThread(threadId)?.messages ?? [])].reverse().find(candidate => candidate.role === 'assistant'); return message ? snapshotMessage(message) : undefined; };
   const unsubscribeInternal = deps.subscribe((threadId, event) => {
     if (!active) return;
+    const traceThread = deps.getThread(threadId);
+    if (traceThread && !traceThread.origin) eligibleTraceIds.add(threadId);
+    const traceChanged = event.type === 'message' || event.type === 'done' || event.type === 'error' || event.type === 'interrupted';
+    if ((traceChanged && traceThread && eligibleTraceIds.has(threadId)) || (event.type === 'thread_deleted' && eligibleTraceIds.delete(threadId))) {
+      const update = freeze({ kind: event.type === 'thread_deleted' ? 'trace.removed' as const : 'trace.updated' as const, sourceId: threadId, revision: traceThread ? traceRevision(traceThread) : 'removed', at: Date.now() });
+      for (const listener of [...traceListeners]) { try { listener(update); } catch (error) { console.error('[ClaudeThreads] Public trace listener failed:', error); } }
+    }
     if (event.type === 'message' && event.message.role === 'assistant') publish({ kind: 'message.completed', threadId, runId: latestRunByThread.get(threadId), message: snapshotMessage(event.message), at: Date.now() });
-    else if (event.type === 'done') { const finalMessage = lastAssistant(threadId); for (const record of activeRuns(threadId)) { settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage }); publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() }); } }
+    else if (event.type === 'done') { const finalMessage = lastAssistant(threadId); const snapshot = deps.getThread(threadId)?.usageSnapshot; const usage = snapshot ? freeze({ inputTokens: snapshot.tokens?.input ?? 0, outputTokens: snapshot.tokens?.output ?? 0, costUsd: snapshot.estimatedCostUsd ?? 0, turns: snapshot.turns }) : undefined; for (const record of activeRuns(threadId)) { settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage, usage }); publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() }); } }
     else if (event.type === 'error' || event.type === 'interrupted') { const code = event.type === 'interrupted' ? 'RUN_INTERRUPTED' : 'RUN_FAILED'; for (const record of activeRuns(threadId)) { const error = publicFailure(code); settle(record, { status: 'failed', runId: record.runId, threadId, error }); publish({ kind: 'run.failed', threadId, runId: record.runId, error, at: Date.now() }); } }
     else if (event.type === 'thread_deleted') publish({ kind: 'thread.removed', threadId, at: Date.now() });
   });
   const send = async (threadId: string, input: SendInput): Promise<{ readonly runId: string }> => {
     guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', `Thread not found: ${threadId}`);
     const prompt = input.prompt?.trim(); if (!prompt) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'prompt is required.');
+    const key = correlationKey(input); const prior = key ? persisted.sends[key] : undefined; if (prior) return freeze({ runId: prior });
+    if (activeRuns(threadId).length > 0 || deps.isRunning(threadId)) throw new ClaudeThreadsApiError('THREAD_BUSY', `Thread is already running: ${threadId}`);
     const runId = crypto.randomUUID(); const record: RunRecord = { runId, threadId, waiters: new Set() }; runs.set(runId, record);
+    persisted.runs[runId] = freeze({ status: 'running', runId, threadId }); if (key) persisted.sends[key] = runId; saveState();
     const ids = runIdsByThread.get(threadId) ?? new Set<string>(); ids.add(runId); runIdsByThread.set(threadId, ids); latestRunByThread.set(threadId, runId);
     publish({ kind: 'run.started', threadId, runId, at: Date.now() });
     try { await deps.sendMessage(threadId, prompt); } catch { const error = publicFailure('RUN_FAILED'); settle(record, { status: 'failed', runId, threadId, error }); publish({ kind: 'run.failed', threadId, runId, error, at: Date.now() }); }
     return freeze({ runId });
   };
+  const cancel = async (runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>> => { guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', `Run not found: ${runId}`); if (record.result) return record.result; await deps.interruptThread?.(record.threadId); const error = publicFailure('RUN_INTERRUPTED'); const result = freeze({ status: 'failed' as const, runId, threadId: record.threadId, error }); settle(record, result); publish({ kind: 'run.failed', threadId: record.threadId, runId, error, at: Date.now() }); return result; };
   const wait = async (runId: string, options?: WaitOptions): Promise<RunResult> => {
     guard(); const record = runs.get(runId); if (!record) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', `Run not found: ${runId}`); if (record.result) return record.result;
     const timeoutMs = Math.max(1, Math.min(options?.timeoutMs ?? 120_000, 600_000));
@@ -100,6 +201,23 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
+  const listTraceSources = async (): Promise<readonly TraceSource[]> => { guard(); const values = deps.getThreads().filter(thread => !thread.origin); const secrets = deps.getRedactionSecrets?.() ?? []; const candidates: Array<TraceSource | null> = await Promise.all(values.map(async thread => { const raw = await deps.readRawLog?.(thread.id); return raw ? freeze({ sourceId: thread.id, threadId: thread.id, projectId: thread.projectId, harness: thread.agentHarness ?? 'claude', revision: traceRevision(thread), contentHash: await traceContentHash(raw.entries, secrets), updatedAt: thread.updatedAt }) : null; })); return freeze(candidates.filter((source): source is TraceSource => source !== null)); };
+  const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => { guard(); const thread = deps.getThread(sourceId); if (!thread || thread.origin) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', `Trace source not found: ${sourceId}`); const raw = await deps.readRawLog?.(sourceId); if (!raw) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', `Trace source not found: ${sourceId}`); const revision = traceRevision(thread); const start = parseCursor(options?.cursor, revision); const limit = Math.max(1, Math.min(Math.floor(options?.limit ?? 100), 500)); const source = raw.entries.slice(start, start + limit) as Array<Record<string, unknown>>; const secrets = deps.getRedactionSecrets?.() ?? []; const events = source.map((entry, offset) => { const type = String(entry.type ?? 'unknown'); const invokedSkill = invokedSkillFromTrace(type, entry.event); return freeze({ index: start + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), data: projectTraceData(type, entry.event, secrets) }); }); const next = start + events.length; return freeze({ sourceId, revision, contentHash: await traceContentHash(raw.entries, secrets), cursor: options?.cursor, nextCursor: next < raw.total ? cursor(next, revision) : undefined, eof: next >= raw.total, events }); };
+  const settleConstrained = (runId: string, result: ConstrainedRunResult) => { persisted.constrained[runId] = result; saveState(); for (const waiter of [...(constrainedWaiters.get(runId) ?? [])]) waiter(result); constrainedWaiters.delete(runId); constrainedControllers.delete(runId); };
+  const createConstrained = async (input: ConstrainedRunInput): Promise<{ readonly runId: string }> => {
+    guard(); if (input.harness !== 'claude' || input.maxTurns !== 1 || !input.ownerPluginId?.trim() || !input.idempotencyKey?.trim() || !input.model?.trim() || !input.systemInstructions?.trim() || !input.prompt?.trim() || !(input.maxBudgetUsd > 0) || !(input.timeoutMs > 0)) throw new ClaudeThreadsApiError('CONSTRAINT_UNSUPPORTED', 'Only bounded, one-turn Claude input-only runs are supported.');
+    if (!deps.runConstrainedQuery) throw new ClaudeThreadsApiError('CONSTRAINT_UNSUPPORTED', 'This host cannot enforce constrained execution.');
+    const key = correlationKey(input)!; const prior = persisted.constrainedKeys[key]; if (prior) return freeze({ runId: prior });
+    const runId = crypto.randomUUID(); persisted.constrainedKeys[key] = runId; persisted.constrained[runId] = freeze({ status: 'running', runId }); saveState();
+    const controller = new AbortController(); constrainedControllers.set(runId, controller);
+    void deps.runConstrainedQuery({ prompt: input.prompt, options: { model: input.model, systemInstructions: input.systemInstructions, maxTurns: 1, maxBudgetUsd: input.maxBudgetUsd, timeoutMs: input.timeoutMs }, signal: controller.signal })
+      .then(result => settleConstrained(runId, freeze({ status: 'completed', runId, output: result.output, model: input.model, usage: result.usage })))
+      .catch(() => { const cancelled = controller.signal.aborted; settleConstrained(runId, freeze({ status: cancelled ? 'cancelled' : 'failed', runId, error: publicFailure(cancelled ? 'RUN_INTERRUPTED' : 'RUN_FAILED') })); });
+    return freeze({ runId });
+  };
+  const getConstrained = async (runId: string): Promise<ConstrainedRunResult> => { guard(); const result = persisted.constrained[runId]; if (!result) throw new ClaudeThreadsApiError('RUN_NOT_FOUND', `Run not found: ${runId}`); return freeze(structuredClone(result)); };
+  const waitConstrained = async (runId: string, options?: WaitOptions): Promise<ConstrainedRunResult> => { const current = await getConstrained(runId); if (current.status !== 'running') return current; const timeoutMs = Math.max(1, Math.min(options?.timeoutMs ?? 120_000, 600_000)); return new Promise(resolve => { let done = false; const finish = (result: ConstrainedRunResult) => { if (done) return; done = true; clearTimeout(timer); constrainedWaiters.get(runId)?.delete(finish); resolve(result); }; const timer = setTimeout(() => finish(freeze({ status: 'running', runId })), timeoutMs); const waiters = constrainedWaiters.get(runId) ?? new Set(); waiters.add(finish); constrainedWaiters.set(runId, waiters); const latest = persisted.constrained[runId]; if (latest?.status !== 'running') finish(latest); }); };
+  const cancelConstrained = async (runId: string): Promise<ConstrainedRunResult> => { const current = await getConstrained(runId); if (current.status !== 'running') return current; const controller = constrainedControllers.get(runId); if (!controller) { const result = freeze({ status: 'cancelled' as const, runId, error: publicFailure('RUN_INTERRUPTED') }); settleConstrained(runId, result); return result; } controller.abort(); const result = freeze({ status: 'cancelled' as const, runId, error: publicFailure('RUN_INTERRUPTED') }); settleConstrained(runId, result); return result; };
   const executeTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
     try {
       if (name === 'ct_send_message') { const threadId = String(args.thread_id ?? '').trim(); const { runId } = await send(threadId, { prompt: String(args.message ?? '').trim() }); if (args.wait === false) return `Message sent to thread ${threadId}. Running in the background.`; return formatRunResult(await wait(runId, { timeoutMs: toolTimeout(args) })); }
@@ -112,14 +230,16 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     } catch (error) { return `Error: ${error instanceof Error ? error.message : String(error)}`; }
   };
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: CAPABILITIES,
-    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const thread = await deps.createThread(input); return freeze({ threadId: thread.id }); }, send, wait,
+    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey(input); const prior = key ? persisted.creates[key] : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(input); if (key) { persisted.creates[key] = thread.id; saveState(); } return freeze({ threadId: thread.id }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', `Thread not found: ${threadId}`); await deps.openThread(threadId); },
       subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); } },
+    traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },
+    constrainedRuns: { create: createConstrained, get: getConstrained, wait: waitConstrained, cancel: cancelConstrained },
     orchestrators: { list: async () => { guard(); return freeze(deps.listOrchestrators().map(item => freeze({ ...item }))); }, dispatch: async (target, input) => { guard(); const threadId = await deps.resolveOrchestrator(target); if (!threadId || !deps.getThread(threadId)) throw new ClaudeThreadsApiError('ORCHESTRATOR_NOT_FOUND', `Orchestrator not found: ${target.id}`); return send(threadId, input); } },
     agentTools: { createBundle: (profile) => { guard(); if (profile !== 'voice-orchestration') throw new ClaudeThreadsApiError('INVALID_ARGUMENT', `Unknown tool profile: ${String(profile)}`); return freeze({ tools: VOICE_TOOLS, execute: executeTool }); } },
   });
   return { api, start: () => { guard(); if (started) return; started = true; deps.triggerHostEvent('claude-threads:api-ready', { apiVersion: 1, generation }); },
-    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); for (const record of runs.values()) if (!record.result) settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
+    stop: () => { if (stopped) return; stopped = true; active = false; deps.triggerHostEvent('claude-threads:api-stopping', { apiVersion: 1, generation }); unsubscribeInternal(); listeners.clear(); traceListeners.clear(); for (const controller of constrainedControllers.values()) controller.abort(); for (const record of runs.values()) if (!record.result) settle(record, { status: 'failed', runId: record.runId, threadId: record.threadId, error: publicFailure('PLUGIN_UNAVAILABLE') }); } };
 }
 
 function toolTimeout(args: Record<string, unknown>): number { return Math.min(Math.max(10, Number(args.timeout_secs) || 120), 300) * 1_000; }

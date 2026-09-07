@@ -491,7 +491,7 @@ export class ThreadManager {
     this.emit(thread.id, { type: 'agent_runs_changed', agentRuns: thread.agentRuns });
   }
 
-  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: 'claude' | 'codex'): Thread {
+  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: 'claude' | 'codex', metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
     const thread: Thread = {
       id: crypto.randomUUID(),
       title: title || `Thread ${this.threads.size + 1}`,
@@ -502,6 +502,7 @@ export class ThreadManager {
       projectId,
       status: 'waiting',
       agentHarness: agentHarness ?? this.settings.agentHarness,
+      ...metadata,
     };
     this.threads.set(thread.id, thread);
     this.emit(thread.id, { type: 'thread_created' });
