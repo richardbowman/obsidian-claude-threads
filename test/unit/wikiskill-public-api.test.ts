@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createClaudeThreadsApiV1, type PublicApiPersistedState } from '../../src/PublicApi';
 
-function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], registeredSkills: readonly string[] = ['integration-routing']) {
+function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], initialRegisteredSkills: readonly string[] = ['integration-routing']) {
   const threads = new Map<string, any>();
   const listeners = new Set<(threadId: string, event: any) => void>();
   const emit = (threadId: string, event: any) => { for (const listener of listeners) listener(threadId, event); };
@@ -20,6 +20,7 @@ function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], reg
     { ts: '2026-01-01T00:00:03Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
   ];
   let traceRevision = 'revision-1';
+  let registeredSkills = [...initialRegisteredSkills];
   let boundaryEpoch = 'one';
   const getTraceMetadata = vi.fn(async (id: string) => threads.has(id) ? ({ sourceId: id, revision: traceRevision, contentHash: 'a'.repeat(64), byteLength: rawEntries(id).length, updatedAt: 3 }) : null);
   const readTraceChunk = vi.fn(async (id: string, options: any) => {
@@ -36,7 +37,7 @@ function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], reg
     triggerHostEvent: () => {}, getTraceMetadata, readTraceChunk, getRegisteredSkillNames: async () => registeredSkills,
     getRedactionSecrets: () => ['api-xyz-123'], getPublicState: () => state, savePublicState: async (next) => { state = structuredClone(next); }, runConstrainedQuery: query,
   } as any);
-  return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; }, rewriteBeforeCursor: () => { boundaryEpoch = 'two'; } };
+  return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; }, rewriteBeforeCursor: () => { boundaryEpoch = 'two'; }, setRegisteredSkills: (names: string[]) => { registeredSkills = names; } };
 }
 
 describe('WikiSkill public API capabilities', () => {
@@ -236,6 +237,40 @@ describe('WikiSkill public API capabilities', () => {
     expect(one.events[2].skillRunOutcomes).toEqual(two.events[2].skillRunOutcomes);
     expect(one.events[2].skillRunOutcomes).toHaveLength(1);
     expect(getTraceMetadata.mock.calls.length).toBeLessThanOrEqual(6);
+  });
+
+  it.each(['pending', 'loaded'] as const)('fails closed when per-session %s skill attribution exceeds its cap', async (mode) => {
+    const entries: any[] = [];
+    for (let i = 0; i < 129; i++) {
+      entries.push({ ts: String(i), type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: `s-${i}`, name: 'Skill', input: { skill: 'integration-routing' } }] } } });
+      if (mode === 'loaded') entries.push({ ts: `${i}r`, type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: `s-${i}` }] } } });
+    }
+    entries.push({ ts: 'end', type: 'result', event: { subtype: 'success', is_error: false } });
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Overflow' });
+    const chunk = await service.api.traces.readChunk(threadId, { limit: 500 });
+    expect(chunk.events.at(-1)?.skillRunOutcomes).toEqual([]);
+    expect(chunk.events.some(event => event.invokedSkill !== undefined)).toBe(false);
+  });
+
+  it('bounds simultaneous distinct-source projection work', async () => {
+    const { service } = harness(); const ids: string[] = [];
+    for (let i = 0; i < 40; i++) ids.push((await service.api.threads.create({ title: String(i) })).threadId);
+    const results = await Promise.allSettled(ids.map(id => service.api.traces.readChunk(id)));
+    expect(results.filter(result => result.status === 'rejected').length).toBeGreaterThan(0);
+  });
+
+  it('reprojects unchanged logs when registered skills are installed or removed', async () => {
+    const entries = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'skill', name: 'Skill', input: { skill: 'new-skill' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'skill' }] } } },
+      { ts: '3', type: 'result', event: { subtype: 'success', is_error: false } },
+    ];
+    const { service, setRegisteredSkills } = harness(undefined, entries, []); const { threadId } = await service.api.threads.create({ title: 'Registry' });
+    expect((await service.api.traces.readChunk(threadId)).events[2].skillRunOutcomes).toEqual([]);
+    setRegisteredSkills(['new-skill']);
+    expect((await service.api.traces.readChunk(threadId)).events[2].skillRunOutcomes).toHaveLength(1);
+    setRegisteredSkills([]);
+    expect((await service.api.traces.readChunk(threadId)).events[2].skillRunOutcomes).toEqual([]);
   });
 
   it('redacts common local path forms in nested multiline trace strings', async () => {

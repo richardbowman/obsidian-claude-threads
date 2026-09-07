@@ -173,28 +173,6 @@ function traceContent(raw: unknown): readonly unknown[] {
   const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : event;
   return Array.isArray(message.content) ? message.content : [];
 }
-function verifiedInvokedSkills(entries: readonly { readonly type: string; readonly event: unknown }[], registeredNames: readonly string[]): { skills: ReadonlyMap<number, string>; outcomes: ReadonlySet<number> } {
-  const registered = new Set(registeredNames.map(name => name.trim()).filter(Boolean));
-  const successfulResults = new Map<string, number>();
-  entries.forEach((entry, index) => { for (const candidate of traceContent(entry.event)) {
-    if (!candidate || typeof candidate !== 'object') continue;
-    const block = candidate as Record<string, unknown>;
-    if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error !== true) successfulResults.set(block.tool_use_id, index);
-  }});
-  const verified = new Map<number, string>();
-  const outcomes = new Set<number>();
-  entries.forEach((entry, index) => {
-    if (entry.type !== 'assistant') return;
-    for (const candidate of traceContent(entry.event)) {
-      if (!candidate || typeof candidate !== 'object') continue;
-      const block = candidate as Record<string, unknown>;
-      if (block.type !== 'tool_use' || block.name !== 'Skill' || typeof block.id !== 'string' || !successfulResults.has(block.id) || !block.input || typeof block.input !== 'object') continue;
-      const skill = (block.input as Record<string, unknown>).skill;
-      if (typeof skill === 'string' && registered.has(skill.trim())) { const name = skill.trim(); const resultIndex = successfulResults.get(block.id)!; verified.set(index, name); verified.set(resultIndex, name); outcomes.add(resultIndex); break; }
-    }
-  });
-  return { skills: verified, outcomes };
-}
 function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
 function boolProp(): Record<string, unknown> { return { type: 'boolean' }; }
@@ -318,14 +296,17 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const next = start + page.length;
     return freeze({ sources, nextCursor: next < values.length && page.length ? sourcePageCursor(page.at(-1)!.id) : undefined, eof: next >= values.length });
   };
-  interface ProjectionState { revision: string; byteOffset: number; eventIndex: number; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; terminals: Map<number, readonly SkillRunOutcome[]> }
+  const MAX_SESSION_SKILL_ATTRIBUTIONS = 128;
+  const MAX_INFLIGHT_SOURCE_PROJECTIONS = 32;
+  interface ProjectionState { revision: string; registryFingerprint: string; byteOffset: number; eventIndex: number; overflowed: boolean; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; attributions: Map<number, { skill: string; loaded: boolean }>; terminals: Map<number, readonly SkillRunOutcome[]> }
   const projectionStates = new Map<string, ProjectionState>();
   const projectionTails = new Map<string, Promise<ProjectionState>>();
   const advanceProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
+    const registryFingerprint = JSON.stringify([...new Set(registeredNames.map(name => name.trim()).filter(Boolean))].sort());
     let state = projectionStates.get(sourceId);
-    if (!state || state.revision !== revision || state.byteOffset > endByteOffset) {
+    if (!state || state.revision !== revision || state.registryFingerprint !== registryFingerprint || state.byteOffset > endByteOffset) {
       if (!state && projectionStates.size >= 100) projectionStates.delete(projectionStates.keys().next().value!);
-      state = { revision, byteOffset: 0, eventIndex: 0, pending: new Map(), loaded: [], terminals: new Map() }; projectionStates.set(sourceId, state);
+      state = { revision, registryFingerprint, byteOffset: 0, eventIndex: 0, overflowed: false, pending: new Map(), loaded: [], attributions: new Map(), terminals: new Map() }; projectionStates.set(sourceId, state);
     } else { projectionStates.delete(sourceId); projectionStates.set(sourceId, state); }
     const registered = new Set(registeredNames);
     while (state.byteOffset < endByteOffset) {
@@ -333,21 +314,29 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       if (!page || page.nextByteOffset <= state.byteOffset) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source could not make forward progress.');
       page.entries.forEach((entry, offset) => {
         const index = state!.eventIndex + offset;
-        if (entry.type === 'session_start') { state!.pending.clear(); state!.loaded = []; }
+        if (entry.type === 'session_start') { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = false; }
         for (const candidate of traceContent(entry.event)) {
           if (!candidate || typeof candidate !== 'object') continue; const block = candidate as Record<string, unknown>;
           if (block.type === 'tool_use' && block.name === 'Skill' && typeof block.id === 'string' && block.input && typeof block.input === 'object') {
-            const skill = (block.input as Record<string, unknown>).skill; if (typeof skill === 'string' && registered.has(skill.trim())) state!.pending.set(block.id, { skill: skill.trim(), index });
+            const skill = (block.input as Record<string, unknown>).skill;
+            if (!state!.overflowed && typeof skill === 'string' && registered.has(skill.trim())) {
+              if (!state!.pending.has(block.id) && state!.pending.size >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = true; }
+              else state!.pending.set(block.id, { skill: skill.trim(), index });
+            }
           } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-            const pending = state!.pending.get(block.tool_use_id); state!.pending.delete(block.tool_use_id); if (pending && block.is_error !== true) state!.loaded.push(pending);
+            const pending = state!.pending.get(block.tool_use_id); state!.pending.delete(block.tool_use_id);
+            if (!state!.overflowed && pending && block.is_error !== true) {
+              if (state!.loaded.length >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = true; }
+              else { state!.loaded.push(pending); state!.attributions.set(pending.index, { skill: pending.skill, loaded: false }); state!.attributions.set(index, { skill: pending.skill, loaded: true }); }
+            }
           }
         }
         if (entry.type === 'result') {
           const result = entry.event && typeof entry.event === 'object' ? entry.event as Record<string, unknown> : {};
           const runOutcome = result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const;
-          state!.terminals.set(index, freeze(state!.loaded.map(item => freeze({ invokedSkill: item.skill, runOutcome, invocationIndex: item.index }))));
+          state!.terminals.set(index, state!.overflowed ? freeze([]) : freeze(state!.loaded.map(item => freeze({ invokedSkill: item.skill, runOutcome, invocationIndex: item.index }))));
           while (state!.terminals.size > 500) state!.terminals.delete(state!.terminals.keys().next().value!);
-          state!.pending.clear(); state!.loaded = [];
+          state!.pending.clear(); state!.loaded = []; state!.overflowed = false;
         }
       });
       state.byteOffset = page.nextByteOffset; state.eventIndex = page.nextEventIndex;
@@ -355,6 +344,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return state;
   };
   const ensureProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
+    if (!projectionTails.has(sourceId) && projectionTails.size >= MAX_INFLIGHT_SOURCE_PROJECTIONS) throw new ClaudeThreadsApiError('RUN_FAILED', 'Trace projection capacity is temporarily exhausted.');
     const waitForPrior: Promise<unknown> = projectionTails.get(sourceId)?.catch(() => undefined) ?? Promise.resolve();
     const current = waitForPrior.then(() => advanceProjection(sourceId, revision, endByteOffset, registeredNames));
     projectionTails.set(sourceId, current);
@@ -375,16 +365,14 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     if (raw.metadata.revision !== metadata.revision) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
     if (position.boundaryHash !== undefined && raw.startBoundaryHash !== position.boundaryHash) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
     const lookahead = raw.eof ? null : await deps.readTraceChunk?.(sourceId, { byteOffset: raw.nextByteOffset, eventIndex: raw.nextEventIndex, limit: 32 }) ?? null;
-    const attributionEntries = [...raw.entries, ...(lookahead?.entries ?? [])];
     const registeredNames = await deps.getRegisteredSkillNames?.() ?? [];
-    const projection = await ensureProjection(sourceId, metadata.revision, raw.nextByteOffset, registeredNames);
-    const invokedSkills = verifiedInvokedSkills(attributionEntries, registeredNames);
+    const projection = await ensureProjection(sourceId, metadata.revision, lookahead?.nextByteOffset ?? raw.nextByteOffset, registeredNames);
     const secrets = deps.getRedactionSecrets?.() ?? [];
     const events = raw.entries.map((entry, offset) => {
       const type = String(entry.type ?? 'unknown');
-      const invokedSkill = invokedSkills.skills.get(offset);
       const index = position.eventIndex + offset;
-      return freeze({ index, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillLoadOutcome: 'loaded' as const } : {}), ...((type === 'result') ? { skillRunOutcomes: projection.terminals.get(index) ?? [] } : {}), data: projectTraceData(type, entry.event, secrets) });
+      const attribution = projection.attributions.get(index);
+      return freeze({ index, timestamp: String(entry.ts ?? ''), type, ...(attribution ? { invokedSkill: attribution.skill } : {}), ...(attribution?.loaded ? { skillLoadOutcome: 'loaded' as const } : {}), ...((type === 'result') ? { skillRunOutcomes: projection.terminals.get(index) ?? [] } : {}), data: projectTraceData(type, entry.event, secrets) });
     });
     return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex, raw.nextBoundaryHash), eof: raw.eof, events });
   };
