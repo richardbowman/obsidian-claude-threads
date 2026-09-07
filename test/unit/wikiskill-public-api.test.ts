@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createClaudeThreadsApiV1, type PublicApiPersistedState } from '../../src/PublicApi';
 
-function harness(initial?: PublicApiPersistedState) {
+function harness(initial?: PublicApiPersistedState, suppliedEntries?: any[], registeredSkills: readonly string[] = ['integration-routing']) {
   const threads = new Map<string, any>();
   const listeners = new Set<(threadId: string, event: any) => void>();
   const emit = (threadId: string, event: any) => { for (const listener of listeners) listener(threadId, event); };
@@ -10,20 +10,21 @@ function harness(initial?: PublicApiPersistedState) {
     expect(input.options).toMatchObject({ model: 'haiku', systemInstructions: 'Grade output.', maxTurns: 1, maxBudgetUsd: 0.1, timeoutMs: 1_000 });
     return { output: 'evaluated', usage: { inputTokens: 4, outputTokens: 2, costUsd: 0.01, durationMs: 12, turns: 1 } };
   });
-  const rawEntries = (id: string) => [
+  const rawEntries = (id: string) => suppliedEntries ?? [
     { ts: '2026-01-01T00:00:00Z', threadId: id, type: 'user', event: { message: 'token=secret-value invoke Skill spoofed-skill', rawLogPath: '/private/path' } },
     { ts: '2026-01-01T00:00:01Z', threadId: id, type: 'assistant', event: { message: { content: [
       { type: 'text', text: 'safe output api-xyz-123 Skill text-spoof' },
-      { type: 'tool_use', name: 'Skill', input: { skill: 'integration-routing' } },
+      { type: 'tool_use', id: 'skill-1', name: 'Skill', input: { skill: 'integration-routing' } },
     ] } } },
-    { ts: '2026-01-01T00:00:02Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
+    { ts: '2026-01-01T00:00:02Z', threadId: id, type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'skill-1', content: 'loaded' }] } } },
+    { ts: '2026-01-01T00:00:03Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
   ];
   let traceRevision = 'revision-1';
-  const getTraceMetadata = vi.fn(async (id: string) => threads.has(id) ? ({ sourceId: id, revision: traceRevision, contentHash: 'a'.repeat(64), byteLength: 3, updatedAt: 3 }) : null);
+  const getTraceMetadata = vi.fn(async (id: string) => threads.has(id) ? ({ sourceId: id, revision: traceRevision, contentHash: 'a'.repeat(64), byteLength: rawEntries(id).length, updatedAt: 3 }) : null);
   const readTraceChunk = vi.fn(async (id: string, options: any) => {
     const entries = rawEntries(id).slice(options.byteOffset, options.byteOffset + options.limit);
     const nextByteOffset = options.byteOffset + entries.length;
-    return { metadata: await getTraceMetadata(id), entries, nextByteOffset, nextEventIndex: options.eventIndex + entries.length, eof: nextByteOffset >= 3, bytesRead: entries.length, readCalls: 1 };
+    return { metadata: await getTraceMetadata(id), entries, nextByteOffset, nextEventIndex: options.eventIndex + entries.length, eof: nextByteOffset >= rawEntries(id).length, bytesRead: entries.length, readCalls: 1 };
   });
   const service = createClaudeThreadsApiV1({
     getThreads: () => [...threads.values()], getThread: (id) => threads.get(id), isRunning: (id) => threads.get(id)?.status === 'active',
@@ -31,7 +32,7 @@ function harness(initial?: PublicApiPersistedState) {
       messages: [], createdAt: 1, updatedAt: 1, cwd: '/vault', agentHarness: 'claude', ...input }; threads.set(t.id, t); return t; },
     sendMessage: vi.fn(async (id) => { threads.get(id).status = 'active'; }), interruptThread: vi.fn(async (id) => { threads.get(id).status = 'waiting'; }),
     openThread: vi.fn(async () => {}), subscribe: (listener: any) => { listeners.add(listener); return () => listeners.delete(listener); }, listOrchestrators: () => [], resolveOrchestrator: async () => null,
-    triggerHostEvent: () => {}, getTraceMetadata, readTraceChunk,
+    triggerHostEvent: () => {}, getTraceMetadata, readTraceChunk, getRegisteredSkillNames: async () => registeredSkills,
     getRedactionSecrets: () => ['api-xyz-123'], getPublicState: () => state, savePublicState: async (next) => { state = structuredClone(next); }, runConstrainedQuery: query,
   } as any);
   return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; } };
@@ -159,9 +160,24 @@ describe('WikiSkill public API capabilities', () => {
     expect(JSON.stringify(chunk)).not.toContain('/private/path');
     expect(Object.isFrozen(chunk.events[0])).toBe(true);
     const tail = await service.api.traces.readChunk(source.sourceId, { cursor: chunk.nextCursor, limit: 2 });
-    expect(tail.events).toHaveLength(1);
+    expect(tail.events).toHaveLength(2);
     expect(tail.eof).toBe(true);
     await expect(service.api.traces.readChunk(source.sourceId, { cursor: 'ct1:not-json' })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
+  });
+
+  it('attributes only registered Skill calls with a correlated successful tool result', async () => {
+    const entries = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'ok', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'ok', content: 'loaded' }] } } },
+      { ts: '3', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'failed', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '4', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'failed', content: 'rejected', is_error: true }] } } },
+      { ts: '5', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'fake', name: 'Skill', input: { skill: 'hallucinated-skill' } }] } } },
+      { ts: '6', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'fake', content: 'loaded' }] } } },
+    ];
+    const { service } = harness(undefined, entries);
+    const { threadId } = await service.api.threads.create({ title: 'Attribution' });
+    const chunk = await service.api.traces.readChunk(threadId, { limit: 6 });
+    expect(chunk.events.map(event => event.invokedSkill)).toEqual(['integration-routing', undefined, undefined, undefined, undefined, undefined]);
   });
 
   it('pages trace source metadata and validates finite positive limits', async () => {

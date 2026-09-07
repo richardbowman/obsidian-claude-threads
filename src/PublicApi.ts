@@ -64,6 +64,7 @@ export interface PublicApiDependencies {
   interruptThread?(id: string): Promise<void>;
   getTraceMetadata?(id: string): Promise<RawLogTraceMetadata | null>;
   readTraceChunk?(id: string, options: { byteOffset: number; eventIndex: number; limit: number }): Promise<RawLogTraceChunk | null>;
+  getRegisteredSkillNames?(): Promise<readonly string[]>;
   getRedactionSecrets?(): readonly string[];
   getPublicState?(): PublicApiPersistedState | undefined; savePublicState?(state: PublicApiPersistedState): Promise<void>;
   runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
@@ -163,19 +164,32 @@ function projectTraceData(type: string, raw: unknown, secrets: readonly string[]
   if (type === 'session_start') return sanitize({ harness: event.harness, model: event.model }, secrets);
   return { kind: type };
 }
-function invokedSkillFromTrace(type: string, raw: unknown): string | undefined {
-  if (type !== 'assistant' || !raw || typeof raw !== 'object') return undefined;
+function traceContent(raw: unknown): readonly unknown[] {
+  if (!raw || typeof raw !== 'object') return [];
   const event = raw as Record<string, unknown>;
-  const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : undefined;
-  if (!message || !Array.isArray(message.content)) return undefined;
-  for (const candidate of message.content) {
+  const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : event;
+  return Array.isArray(message.content) ? message.content : [];
+}
+function verifiedInvokedSkills(entries: readonly { readonly type: string; readonly event: unknown }[], registeredNames: readonly string[]): ReadonlyMap<number, string> {
+  const registered = new Set(registeredNames.map(name => name.trim()).filter(Boolean));
+  const successfulResults = new Set<string>();
+  for (const entry of entries) for (const candidate of traceContent(entry.event)) {
     if (!candidate || typeof candidate !== 'object') continue;
     const block = candidate as Record<string, unknown>;
-    if (block.type !== 'tool_use' || block.name !== 'Skill' || !block.input || typeof block.input !== 'object') continue;
-    const skill = (block.input as Record<string, unknown>).skill;
-    if (typeof skill === 'string' && skill.trim()) return skill.trim();
+    if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error !== true) successfulResults.add(block.tool_use_id);
   }
-  return undefined;
+  const verified = new Map<number, string>();
+  entries.forEach((entry, index) => {
+    if (entry.type !== 'assistant') return;
+    for (const candidate of traceContent(entry.event)) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      const block = candidate as Record<string, unknown>;
+      if (block.type !== 'tool_use' || block.name !== 'Skill' || typeof block.id !== 'string' || !successfulResults.has(block.id) || !block.input || typeof block.input !== 'object') continue;
+      const skill = (block.input as Record<string, unknown>).skill;
+      if (typeof skill === 'string' && registered.has(skill.trim())) { verified.set(index, skill.trim()); break; }
+    }
+  });
+  return verified;
 }
 function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
@@ -301,10 +315,13 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     catch (error) { if (error instanceof RangeError) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); throw error; }
     if (!raw) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.');
     if (raw.metadata.revision !== metadata.revision) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
+    const lookahead = raw.eof ? null : await deps.readTraceChunk?.(sourceId, { byteOffset: raw.nextByteOffset, eventIndex: raw.nextEventIndex, limit: 32 }) ?? null;
+    const attributionEntries = [...raw.entries, ...(lookahead?.entries ?? [])];
+    const invokedSkills = verifiedInvokedSkills(attributionEntries, await deps.getRegisteredSkillNames?.() ?? []);
     const secrets = deps.getRedactionSecrets?.() ?? [];
     const events = raw.entries.map((entry, offset) => {
       const type = String(entry.type ?? 'unknown');
-      const invokedSkill = invokedSkillFromTrace(type, entry.event);
+      const invokedSkill = invokedSkills.get(offset);
       return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), data: projectTraceData(type, entry.event, secrets) });
     });
     return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: raw.eof ? undefined : traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });

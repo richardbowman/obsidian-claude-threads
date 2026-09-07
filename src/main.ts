@@ -1914,6 +1914,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
       interruptThread: (id) => this.manager.interrupt(id),
       getTraceMetadata: (id) => this.manager.getRawLogTraceMetadata(id),
       readTraceChunk: (id, options) => this.manager.readRawLogTraceChunk(id, options),
+      getRegisteredSkillNames: async () => {
+        const { listInstalledSkills } = require('./skillManager') as typeof import('./skillManager');
+        return (await listInstalledSkills(this.settings.skillSources ?? [])).map(skill => skill.name);
+      },
       getRedactionSecrets: () => [
         ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
         ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings))).filter(([name]) => /(?:token|secret|key|password)/i.test(name)).map(([, value]) => value),
