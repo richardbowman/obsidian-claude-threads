@@ -18,7 +18,12 @@ export function createConstrainedQueryRunner(
     // importing the plugin bundle remains safe on Obsidian Mobile.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const os = require('os') as typeof import('os');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path') as typeof import('path');
     const settings = getSettings();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-threads-constrained-'));
     const abortController = new AbortController();
     const abort = () => abortController.abort();
     signal.addEventListener('abort', abort, { once: true });
@@ -30,8 +35,8 @@ export function createConstrainedQueryRunner(
         options: {
           abortController,
           pathToClaudeCodeExecutable: settings.claudeBinaryPath,
-          env: { ...process.env, ...parseExtraEnv(effectiveExtraEnv(settings)), CLAUDE_AGENT_SDK_CLIENT_APP: 'agent-threads/constrained-runs' },
-          cwd: os.tmpdir(),
+          env: constrainedEnvironment(cwd, parseExtraEnv(effectiveExtraEnv(settings))),
+          cwd,
           model: options.model,
           systemPrompt: options.systemInstructions,
           tools: [],
@@ -53,6 +58,7 @@ export function createConstrainedQueryRunner(
         if (message.type === 'result') result = message;
       }
       if (!result || result.subtype !== 'success' || result.is_error) throw new Error('Constrained run failed.');
+      if (result.result.length > 1_000_000) throw new Error('Constrained run output exceeds the 1000000 character limit.');
       return {
         output: result.result,
         usage: {
@@ -66,6 +72,21 @@ export function createConstrainedQueryRunner(
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', abort);
+      fs.rmSync(cwd, { recursive: true, force: true });
     }
   };
+}
+
+const AUTH_ENV = /^(?:ANTHROPIC_(?:API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_(?:OAUTH_TOKEN|USE_BEDROCK|USE_VERTEX)|AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|REGION|DEFAULT_REGION|PROFILE|ROLE_ARN|WEB_IDENTITY_TOKEN_FILE)|GOOGLE_APPLICATION_CREDENTIALS)$/;
+function constrainedEnvironment(cwd: string, configured: Record<string, string>): Record<string, string> {
+  const source = { ...process.env, ...configured };
+  const env: Record<string, string> = {
+    HOME: cwd,
+    TMPDIR: cwd,
+    CLAUDE_CONFIG_DIR: cwd,
+    CLAUDE_AGENT_SDK_CLIENT_APP: 'agent-threads/constrained-runs',
+  };
+  if (source.PATH) env.PATH = source.PATH;
+  for (const [name, value] of Object.entries(source)) if (typeof value === 'string' && AUTH_ENV.test(name)) env[name] = value;
+  return env;
 }

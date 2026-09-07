@@ -30,6 +30,90 @@ function harness(initial?: PublicApiPersistedState) {
 }
 
 describe('WikiSkill public API capabilities', () => {
+  it('binds idempotency keys to operation, thread, and an exact input fingerprint', async () => {
+    const { service } = harness();
+    const first = await service.api.threads.create({ title: 'One', ownerPluginId: 'wiki', idempotencyKey: 'same' });
+    await expect(service.api.threads.create({ title: 'Different', ownerPluginId: 'wiki', idempotencyKey: 'same' }))
+      .rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    const second = await service.api.threads.create({ title: 'Two', ownerPluginId: 'wiki', idempotencyKey: 'other' });
+    const sent = await service.api.threads.send(first.threadId, { prompt: 'one', ownerPluginId: 'wiki', idempotencyKey: 'send' });
+    await service.api.threads.cancel(sent.runId);
+    await expect(service.api.threads.send(first.threadId, { prompt: 'different', ownerPluginId: 'wiki', idempotencyKey: 'send' }))
+      .rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    await expect(service.api.threads.send(second.threadId, { prompt: 'one', ownerPluginId: 'wiki', idempotencyKey: 'send' }))
+      .resolves.toHaveProperty('runId');
+  });
+
+  it('derives origin from ownerPluginId and awaits persistence before exposing resources', async () => {
+    let releaseSave!: () => void;
+    let saved = false;
+    const base = harness();
+    const deps = (base.service as any);
+    void deps;
+    const threads = new Map<string, any>();
+    const service = createClaudeThreadsApiV1({
+      getThreads: () => [...threads.values()], getThread: id => threads.get(id), isRunning: () => false,
+      createThread: (input: any) => { const t = { id: 't1', title: input.title, status: 'waiting', reviewed: false, messages: [], createdAt: 1, updatedAt: 1, cwd: '/vault', agentHarness: 'claude', ...input }; threads.set(t.id, t); return t; },
+      sendMessage: async () => {}, openThread: async () => {}, subscribe: () => () => {}, listOrchestrators: () => [], resolveOrchestrator: async () => null,
+      triggerHostEvent: () => {}, savePublicState: async () => { await new Promise<void>(resolve => { releaseSave = resolve; }); saved = true; },
+    } as any);
+    let settled = false;
+    const creating = service.api.threads.create({ title: 'Managed', ownerPluginId: 'wiki', idempotencyKey: 'create' }).then(value => { settled = true; return value; });
+    await vi.waitFor(() => expect(releaseSave).toBeTypeOf('function'));
+    expect(settled).toBe(false);
+    releaseSave();
+    const { threadId } = await creating;
+    expect(saved).toBe(true);
+    expect((await service.api.threads.get(threadId))?.origin).toBe('wiki');
+  });
+
+  it('rejects non-finite and oversized public inputs', async () => {
+    const { service, query } = harness();
+    await expect(service.api.threads.create({ title: 'x', ownerPluginId: 'w'.repeat(129), idempotencyKey: 'k' }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const { threadId } = await service.api.threads.create({ title: 'Task' });
+    await expect(service.api.threads.send(threadId, { prompt: 'x'.repeat(100_001) }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(service.api.threads.wait('missing', { timeoutMs: Number.NaN }))
+      .rejects.toMatchObject({ code: 'RUN_NOT_FOUND' });
+    const base = { ownerPluginId: 'wiki', idempotencyKey: 'eval-bounds', harness: 'claude' as const, model: 'haiku', systemInstructions: 'Grade.', prompt: 'fixture', maxTurns: 1 as const, maxBudgetUsd: 0.1, timeoutMs: 1_000 };
+    await expect(service.api.constrainedRuns.create({ ...base, maxBudgetUsd: Number.POSITIVE_INFINITY }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(service.api.constrainedRuns.create({ ...base, timeoutMs: Number.NaN }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('bounds message content retained in public snapshots and run state', async () => {
+    const { service, threads, emit } = harness();
+    const { threadId } = await service.api.threads.create({ title: 'Bounded' });
+    const { runId } = await service.api.threads.send(threadId, { prompt: 'go' });
+    threads.get(threadId).messages.push({ id: 'large', role: 'assistant', content: 'x'.repeat(100_001), timestamp: 2 });
+    emit(threadId, { type: 'done' });
+    const result = await service.api.threads.wait(runId);
+    expect(result.status === 'completed' ? result.finalMessage?.content.length : 0).toBe(100_000);
+  });
+
+  it('uses first-terminal-wins when constrained cancellation races completion', async () => {
+    let complete!: (value: any) => void;
+    const first = harness();
+    first.query.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    const created = await first.service.api.constrainedRuns.create({ ownerPluginId: 'wiki', idempotencyKey: 'race', harness: 'claude', model: 'haiku', systemInstructions: 'Grade.', prompt: 'fixture', maxTurns: 1, maxBudgetUsd: 0.1, timeoutMs: 1_000 });
+    const cancelled = await first.service.api.constrainedRuns.cancel(created.runId);
+    complete({ output: 'late success', usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(cancelled.status).toBe('cancelled');
+    await expect(first.service.api.constrainedRuns.get(created.runId)).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
+  it('settles constrained waiters when the API generation stops', async () => {
+    const first = harness();
+    first.query.mockImplementation(() => new Promise(() => {}));
+    const created = await first.service.api.constrainedRuns.create({ ownerPluginId: 'wiki', idempotencyKey: 'stop', harness: 'claude', model: 'haiku', systemInstructions: 'Grade.', prompt: 'fixture', maxTurns: 1, maxBudgetUsd: 0.1, timeoutMs: 1_000 });
+    const waiting = first.service.api.constrainedRuns.wait(created.runId);
+    first.service.stop();
+    await expect(waiting).resolves.toMatchObject({ status: 'failed', error: { code: 'PLUGIN_UNAVAILABLE' } });
+  });
   it('creates correlated background threads idempotently and excludes their traces', async () => {
     const { service, threads } = harness();
     const input = { title: 'WikiSkill author', ownerPluginId: 'geode-wikiskill', idempotencyKey: 'job-1', origin: 'geode-wikiskill', externalJobId: 'job-1', ephemeral: true, background: true };

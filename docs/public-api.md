@@ -10,12 +10,12 @@ Listen for `claude-threads:api-ready` and `claude-threads:api-stopping`, reacqui
 
 ## WikiSkill-safe capabilities
 
-- `threads.create/send/wait/cancel` accepts caller correlation. Supplying both `ownerPluginId` and `idempotencyKey` makes create/send retries idempotent. A second distinct active send fails with `THREAD_BUSY`.
-- `origin`, `externalJobId`, `ephemeral`, and `background` identify managed work. Threads with an `origin` are excluded from trace sources to prevent self-training loops.
+- `threads.create/send/wait/cancel` accepts caller correlation. Supplying both `ownerPluginId` and `idempotencyKey` makes create/send retries idempotent. Keys are bound to their operation, target thread, and an input fingerprint; reuse with different input fails with `IDEMPOTENCY_CONFLICT`. A second distinct active send fails with `THREAD_BUSY`.
+- `origin`, `externalJobId`, `ephemeral`, and `background` identify managed work. When an owner is supplied, omitted origin defaults to `ownerPluginId` so managed work fails safe. Background threads are hidden from both Agent Board views. Threads with an `origin` are excluded from trace sources to prevent self-training loops.
 - `traces.listSources/readChunk/subscribe` returns immutable, bounded, sanitized semantic records through opaque cursors. `TraceEvent.invokedSkill` is present only when Agent Threads observes a structured assistant `Skill` tool invocation; text cannot claim attribution, so consumers should reject events where it is absent. Raw log paths, credentials, and known secret fields are never returned.
-- `constrainedRuns` provides Claude-only, one-turn, input-only evaluation. It loads no tools, MCP servers, settings sources, skills, plugins, filesystem context, or resumable session. Unsupported constraints fail with `CONSTRAINT_UNSUPPORTED`.
+- `constrainedRuns` provides Claude-only, one-turn, input-only evaluation. It runs in a fresh empty directory with an isolated home/config directory and an authentication-only environment, then removes that directory. It loads no tools, MCP servers, settings sources, skills, plugins, host filesystem context, or resumable session. Inputs, budgets, timeouts, state, and output are bounded. Unsupported constraints fail with `CONSTRAINT_UNSUPPORTED`.
 
-The API persists idempotency mappings and bounded results. A provider reload marks an in-flight operation interrupted; a consumer can reacquire v1 and reconcile it by run ID without duplicating work.
+The API serializes correlated operations and awaits atomic host persistence before returning their handles. Idempotency mappings and results are retained and evicted as pairs. A provider reload marks an in-flight operation interrupted; a consumer can reacquire v1 and reconcile it by run ID without duplicating work. Cancellation, completion, and provider shutdown use first-terminal-wins semantics.
 
 ## Security boundary
 

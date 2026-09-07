@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Thread } from '../../src/types';
 import { partitionThreads, type ThreadClassificationFlags } from '../../src/threadRowState';
+import { isKanbanThread } from '../../src/KanbanView';
 
 /**
  * Exercises KanbanView's actual bucketing algorithm (`bucketize()` in
@@ -86,6 +87,10 @@ function withFlags(
 // ── single-thread bucket assignment ───────────────────────────────────────────
 
 describe('KanbanView bucketing — single-thread placement', () => {
+  it('excludes public API background threads from every Kanban surface', () => {
+    expect(isKanbanThread(makeThread('managed', 1, { background: true }))).toBe(false);
+    expect(isKanbanThread(makeThread('visible', 1))).toBe(true);
+  });
   it('running thread without pending permission → Working', () => {
     const t = makeThread('t1', 1_000);
     const { working, awaiting, newThreads, done, failed, ready } = bucketThreads([
