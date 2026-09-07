@@ -168,7 +168,12 @@ export class RawLogWriter {
       return null;
     }
     if (!stat.isFile()) return null;
-    const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+    const handle = await fs.promises.open(abs, 'r');
+    const prefix = Buffer.alloc(Math.min(4096, stat.size));
+    try { await handle.read(prefix, 0, prefix.length, 0); } finally { await handle.close(); }
+    const firstLineEnd = prefix.indexOf(0x0a);
+    const immutablePrefix = prefix.subarray(0, firstLineEnd >= 0 ? firstLineEnd + 1 : prefix.length);
+    const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${crypto.createHash('sha256').update(immutablePrefix).digest('hex')}`;
     const previous = this.traceFiles.get(abs);
     const epoch = previous && (previous.identity !== identity || stat.size < previous.size)
       ? previous.epoch + 1
@@ -181,7 +186,8 @@ export class RawLogWriter {
 
   /**
    * Stream a bounded number of JSONL entries from a known line boundary. At
-   * most 64 KiB is read per call; malformed complete lines are skipped.
+   * Reads in 64 KiB blocks. A semantic line is capped at 1 MiB; longer lines
+   * are skipped through their newline so a corrupt record cannot wedge paging.
    */
   async readTraceChunk(
     threadId: string,
@@ -200,12 +206,26 @@ export class RawLogWriter {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require('fs') as typeof import('fs');
     const handle = await fs.promises.open(abs, 'r');
-    const maxBytes = 64 * 1024;
-    const readSize = Math.min(maxBytes, metadata.byteLength - options.byteOffset);
-    const buffer = Buffer.alloc(readSize);
-    let bytesRead = 0;
+    const blockSize = 64 * 1024; const maxLineBytes = 1024 * 1024;
+    let bytesRead = 0; let readCalls = 0; let position = options.byteOffset; let pending = Buffer.alloc(0); let done = false;
+    const completeLines: Buffer[] = [];
     try {
-      ({ bytesRead } = await handle.read(buffer, 0, readSize, options.byteOffset));
+      while (!done && position < metadata.byteLength && completeLines.length < options.limit) {
+        const buffer = Buffer.alloc(Math.min(blockSize, metadata.byteLength - position));
+        const read = await handle.read(buffer, 0, buffer.length, position); readCalls += 1; if (!read.bytesRead) break;
+        bytesRead += read.bytesRead; position += read.bytesRead; pending = Buffer.concat([pending, buffer.subarray(0, read.bytesRead)]);
+        let newline: number;
+        while ((newline = pending.indexOf(0x0a)) >= 0) {
+          const line = pending.subarray(0, newline); pending = pending.subarray(newline + 1);
+          if (line.length <= maxLineBytes) completeLines.push(line);
+          if (completeLines.length >= options.limit) { done = true; break; }
+        }
+        if (pending.length > maxLineBytes) {
+          // Keep scanning without retaining an unbounded corrupt line.
+          pending = Buffer.alloc(maxLineBytes + 1, 0x78);
+        }
+      }
+      if (position >= metadata.byteLength && pending.length && pending.length <= maxLineBytes) completeLines.push(pending);
     } finally {
       await handle.close();
     }
@@ -215,16 +235,10 @@ export class RawLogWriter {
     }
 
     const entries: RawLogEnvelope[] = [];
-    let consumed = 0;
+    let consumed = bytesRead - pending.length;
     let eventIndex = options.eventIndex;
-    while (consumed < bytesRead && entries.length < options.limit) {
-      let newline = buffer.indexOf(0x0a, consumed);
-      if (newline < 0) {
-        if (options.byteOffset + bytesRead < currentMetadata.byteLength) break;
-        newline = bytesRead;
-      }
-      const line = buffer.subarray(consumed, newline).toString('utf8');
-      consumed = Math.min(newline + 1, bytesRead);
+    for (const rawLine of completeLines) {
+      const line = rawLine.toString('utf8');
       if (!line.trim()) continue;
       try {
         entries.push(JSON.parse(line) as RawLogEnvelope);
@@ -233,9 +247,7 @@ export class RawLogWriter {
         // Preserve the full-reader behavior: malformed complete lines are skipped.
       }
     }
-    if (consumed === 0 && bytesRead > 0 && options.byteOffset + bytesRead < currentMetadata.byteLength) {
-      throw new RangeError('A trace line exceeds the maximum streamed chunk size.');
-    }
+    if (position >= currentMetadata.byteLength) consumed = bytesRead;
     const nextByteOffset = options.byteOffset + consumed;
     return {
       metadata: currentMetadata,
@@ -244,7 +256,7 @@ export class RawLogWriter {
       nextEventIndex: eventIndex,
       eof: nextByteOffset >= currentMetadata.byteLength,
       bytesRead,
-      readCalls: 1,
+      readCalls,
     };
   }
 

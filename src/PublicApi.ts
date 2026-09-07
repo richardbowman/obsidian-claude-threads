@@ -29,8 +29,8 @@ export interface Disposable { dispose(): void }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
 export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
 export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
-export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly data: unknown }
-export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor?: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
+export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillOutcome?: 'success'; readonly data: unknown }
+export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
 export type PublicTraceEvent = { readonly kind: 'trace.updated' | 'trace.removed'; readonly sourceId: string; readonly revision: string; readonly at: number };
 export interface ConstrainedRunInput extends CorrelationInput { readonly ownerPluginId: string; readonly idempotencyKey: string; readonly harness: 'claude'; readonly model: string; readonly systemInstructions: string; readonly prompt: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }
 export type ConstrainedRunResult =
@@ -80,6 +80,7 @@ function snapshotMessage(message: ChatMessage): MessageSnapshot { return freeze(
 function snapshotSummary(thread: Thread, running: boolean): ThreadSummary { return freeze({ id: thread.id, title: thread.title, status: thread.status ?? 'waiting', reviewed: thread.reviewed ?? false, cwd: thread.cwd, projectId: thread.projectId, agentHarness: thread.agentHarness ?? 'claude', origin: thread.origin, externalJobId: thread.externalJobId, ephemeral: thread.ephemeral, background: thread.background, createdAt: thread.createdAt, updatedAt: thread.updatedAt, isRunning: running, messageCount: thread.messages.length }); }
 const EMPTY_STATE = (): PublicApiPersistedState => ({ version: 1, creates: {}, sends: {}, runs: {}, constrained: {}, constrainedKeys: {} });
 const MAX_PERSISTED_RECORDS = 500;
+const MAX_PERSISTED_STATE_BYTES = 1024 * 1024;
 function trimRecord<T>(record: Record<string, T>): void { const keys = Object.keys(record); for (const key of keys.slice(0, Math.max(0, keys.length - MAX_PERSISTED_RECORDS))) delete record[key]; }
 const MAX_OWNER_LENGTH = 128;
 const MAX_KEY_LENGTH = 256;
@@ -126,10 +127,10 @@ function parseTraceCursor(value: string | undefined, sourceId: string, revision:
     return { byteOffset: decoded.byteOffset, eventIndex: decoded.eventIndex };
   } catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); }
 }
-function sourcePageCursor(index: number): string { return `cts1:${btoa(JSON.stringify({ index }))}`; }
-function parseSourcePageCursor(value: string | undefined): number {
-  if (!value) return 0;
-  try { if (!value.startsWith('cts1:')) throw new Error(); const decoded = JSON.parse(atob(value.slice(5))) as { index: number }; if (!Number.isInteger(decoded.index) || decoded.index < 0) throw new Error(); return decoded.index; }
+function sourcePageCursor(after: string): string { return `cts1:${btoa(JSON.stringify({ after }))}`; }
+function parseSourcePageCursor(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try { if (!value.startsWith('cts1:')) throw new Error(); const decoded = JSON.parse(atob(value.slice(5))) as { after: string }; if (typeof decoded.after !== 'string' || !decoded.after) throw new Error(); return decoded.after; }
   catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source cursor is invalid.'); }
 }
 function positiveLimit(value: number | undefined, fallback: number): number {
@@ -139,8 +140,9 @@ function positiveLimit(value: number | undefined, fallback: number): number {
 }
 const SENSITIVE_KEY = /(?:token|secret|password|authorization|cookie|rawlogpath|path)$/i;
 const SENSITIVE_VALUE = /\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s,;]+/gi;
+const LOCAL_PATH = /file:\/\/\/(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+|[A-Za-z]:\\[^\s"'<>]+|~[\\/][^\s"'<>]+|\/(?:Users|home|private|tmp|var|etc|opt|Volumes)\/[^\s"'<>]+/gi;
 function sanitize(value: unknown, secrets: readonly string[] = []): unknown {
-  if (typeof value === 'string') return secrets.filter(secret => secret.length >= 4).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value.replace(SENSITIVE_VALUE, '[REDACTED]'));
+  if (typeof value === 'string') return secrets.filter(secret => secret.length >= 4).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value.replace(SENSITIVE_VALUE, '[REDACTED]').replace(LOCAL_PATH, '[PATH]'));
   if (Array.isArray(value)) return value.map(item => sanitize(item, secrets));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !SENSITIVE_KEY.test(key)).map(([key, nested]) => [key, sanitize(nested, secrets)]));
   return value;
@@ -170,15 +172,16 @@ function traceContent(raw: unknown): readonly unknown[] {
   const message = event.message && typeof event.message === 'object' ? event.message as Record<string, unknown> : event;
   return Array.isArray(message.content) ? message.content : [];
 }
-function verifiedInvokedSkills(entries: readonly { readonly type: string; readonly event: unknown }[], registeredNames: readonly string[]): ReadonlyMap<number, string> {
+function verifiedInvokedSkills(entries: readonly { readonly type: string; readonly event: unknown }[], registeredNames: readonly string[]): { skills: ReadonlyMap<number, string>; outcomes: ReadonlySet<number> } {
   const registered = new Set(registeredNames.map(name => name.trim()).filter(Boolean));
-  const successfulResults = new Set<string>();
-  for (const entry of entries) for (const candidate of traceContent(entry.event)) {
+  const successfulResults = new Map<string, number>();
+  entries.forEach((entry, index) => { for (const candidate of traceContent(entry.event)) {
     if (!candidate || typeof candidate !== 'object') continue;
     const block = candidate as Record<string, unknown>;
-    if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error !== true) successfulResults.add(block.tool_use_id);
-  }
+    if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error !== true) successfulResults.set(block.tool_use_id, index);
+  }});
   const verified = new Map<number, string>();
+  const outcomes = new Set<number>();
   entries.forEach((entry, index) => {
     if (entry.type !== 'assistant') return;
     for (const candidate of traceContent(entry.event)) {
@@ -186,10 +189,10 @@ function verifiedInvokedSkills(entries: readonly { readonly type: string; readon
       const block = candidate as Record<string, unknown>;
       if (block.type !== 'tool_use' || block.name !== 'Skill' || typeof block.id !== 'string' || !successfulResults.has(block.id) || !block.input || typeof block.input !== 'object') continue;
       const skill = (block.input as Record<string, unknown>).skill;
-      if (typeof skill === 'string' && registered.has(skill.trim())) { verified.set(index, skill.trim()); break; }
+      if (typeof skill === 'string' && registered.has(skill.trim())) { const name = skill.trim(); const resultIndex = successfulResults.get(block.id)!; verified.set(index, name); verified.set(resultIndex, name); outcomes.add(resultIndex); break; }
     }
   });
-  return verified;
+  return { skills: verified, outcomes };
 }
 function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
@@ -235,6 +238,17 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     trimRecord(persisted.constrained);
     const retainedConstrained = new Set(Object.keys(persisted.constrained));
     for (const [key, value] of Object.entries(persisted.constrainedKeys)) if (!retainedConstrained.has(typeof value === 'string' ? value : value.resourceId)) delete persisted.constrainedKeys[key];
+    const removeReferences = (record: Record<string, string | CorrelatedResource>, resourceId: string) => { for (const [key, value] of Object.entries(record)) if ((typeof value === 'string' ? value : value.resourceId) === resourceId) delete record[key]; };
+    while (new TextEncoder().encode(JSON.stringify(persisted)).byteLength > MAX_PERSISTED_STATE_BYTES) {
+      const constrainedId = Object.keys(persisted.constrained).find(id => persisted.constrained[id].status !== 'running');
+      if (constrainedId) { delete persisted.constrained[constrainedId]; removeReferences(persisted.constrainedKeys, constrainedId); continue; }
+      const runId = Object.keys(persisted.runs).find(id => persisted.runs[id].status !== 'running');
+      if (runId) { delete persisted.runs[runId]; removeReferences(persisted.sends, runId); continue; }
+      const createKey = Object.keys(persisted.creates)[0]; if (createKey) { delete persisted.creates[createKey]; continue; }
+      const constrainedKey = Object.keys(persisted.constrainedKeys)[0]; if (constrainedKey) { delete persisted.constrainedKeys[constrainedKey]; continue; }
+      const sendKey = Object.keys(persisted.sends)[0]; if (sendKey) { delete persisted.sends[sendKey]; continue; }
+      break;
+    }
   };
   let saveChain: Promise<void> = Promise.resolve();
   const saveState = async () => { trimPairedState(); const snapshot = structuredClone(persisted); saveChain = saveChain.catch(() => undefined).then(() => deps.savePublicState?.(snapshot) ?? Promise.resolve()); await saveChain; reconciliationDirty = false; };
@@ -289,9 +303,10 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   const listTraceSources = async (options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage> => {
     guard();
     const limit = positiveLimit(options?.limit, 100);
-    const values = deps.getThreads().filter(thread => !thread.origin);
-    const start = parseSourcePageCursor(options?.cursor);
-    if (start > values.length) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source cursor is invalid.');
+    const values = deps.getThreads().filter(thread => !thread.origin).sort((a, b) => a.id.localeCompare(b.id));
+    const after = parseSourcePageCursor(options?.cursor);
+    const start = after === undefined ? 0 : values.findIndex(thread => thread.id > after);
+    if (after !== undefined && start < 0) return freeze({ sources: [], eof: true });
     const page = values.slice(start, start + limit);
     const sources: TraceSource[] = [];
     for (const thread of page) {
@@ -300,7 +315,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
       sources.push(freeze({ sourceId: thread.id, threadId: thread.id, projectId: thread.projectId, harness: thread.agentHarness ?? 'claude', revision: metadata.revision, contentHash: metadata.contentHash, byteLength: metadata.byteLength, updatedAt: metadata.updatedAt }));
     }
     const next = start + page.length;
-    return freeze({ sources, nextCursor: next < values.length ? sourcePageCursor(next) : undefined, eof: next >= values.length });
+    return freeze({ sources, nextCursor: next < values.length && page.length ? sourcePageCursor(page.at(-1)!.id) : undefined, eof: next >= values.length });
   };
   const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => {
     guard();
@@ -321,10 +336,10 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const secrets = deps.getRedactionSecrets?.() ?? [];
     const events = raw.entries.map((entry, offset) => {
       const type = String(entry.type ?? 'unknown');
-      const invokedSkill = invokedSkills.get(offset);
-      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), data: projectTraceData(type, entry.event, secrets) });
+      const invokedSkill = invokedSkills.skills.get(offset);
+      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillOutcome: 'success' as const } : {}), data: projectTraceData(type, entry.event, secrets) });
     });
-    return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: raw.eof ? undefined : traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });
+    return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });
   };
   const settleConstrained = async (runId: string, result: ConstrainedRunResult): Promise<ConstrainedRunResult> => {
     const current = persisted.constrained[runId];
@@ -369,7 +384,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     } catch (error) { return `Error: ${error instanceof Error ? error.message : String(error)}`; }
   };
   const api: ClaudeThreadsApiV1 = freeze({ apiVersion: 1 as const, generation, capabilities: CAPABILITIES,
-    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: boundedString(input.origin, 'origin', MAX_OWNER_LENGTH) ?? boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH), externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
+    threads: { list, get, create: async (input: CreateThreadInput) => { guard(); const key = correlationKey('create', input); const owner = boundedString(input.ownerPluginId, 'ownerPluginId', MAX_OWNER_LENGTH); const explicitOrigin = boundedString(input.origin, 'origin', MAX_OWNER_LENGTH); if (owner && explicitOrigin && owner !== explicitOrigin) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'origin must match ownerPluginId.'); const normalized = { ...input, title: boundedString(input.title, 'title', 512), origin: explicitOrigin ?? owner, externalJobId: boundedString(input.externalJobId, 'externalJobId', MAX_KEY_LENGTH) }; const fp = await fingerprint(normalized); return serialize(key ?? `create:${crypto.randomUUID()}`, async () => { const prior = key ? correlatedId(persisted.creates[key], fp) : undefined; if (prior && deps.getThread(prior)) return freeze({ threadId: prior }); const thread = await deps.createThread(normalized); if (key) { persisted.creates[key] = freeze({ resourceId: thread.id, fingerprint: fp }); await saveState(); } return freeze({ threadId: thread.id }); }); }, send, wait, cancel,
       open: async (threadId: string) => { guard(); if (!deps.getThread(threadId)) throw new ClaudeThreadsApiError('THREAD_NOT_FOUND', 'Thread not found.'); await deps.openThread(threadId); },
       subscribe: (listener: (event: PublicThreadEvent) => void) => { guard(); listeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; listeners.delete(listener); } }); } },
     traces: { listSources: listTraceSources, readChunk: readTraceChunk, subscribe: (listener: (event: PublicTraceEvent) => void) => { guard(); traceListeners.add(listener); let disposed = false; return freeze({ dispose: () => { if (disposed) return; disposed = true; traceListeners.delete(listener); } }); } },

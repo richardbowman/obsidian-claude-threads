@@ -12,6 +12,7 @@ type QueryFunction = typeof query;
 export function createConstrainedQueryRunner(
   getSettings: () => Pick<PluginSettings, 'claudeBinaryPath' | 'extraEnv' | 'provider'>,
   runQuery: QueryFunction = query,
+  getAuthentication: () => Record<string, string> = () => ({}),
 ): (input: ConstrainedQueryInput) => Promise<ConstrainedQueryOutput> {
   return async ({ prompt, options, signal }) => {
     // Desktop-only execution path. Keep Node built-ins out of module init so
@@ -35,7 +36,7 @@ export function createConstrainedQueryRunner(
         options: {
           abortController,
           pathToClaudeCodeExecutable: settings.claudeBinaryPath,
-          env: constrainedEnvironment(cwd, parseExtraEnv(effectiveExtraEnv(settings))),
+          env: constrainedEnvironment(cwd, { ...parseExtraEnv(effectiveExtraEnv(settings)), ...getAuthentication() }),
           cwd,
           model: options.model,
           systemPrompt: options.systemInstructions,
@@ -58,7 +59,7 @@ export function createConstrainedQueryRunner(
         if (message.type === 'result') result = message;
       }
       if (!result || result.subtype !== 'success' || result.is_error) throw new Error('Constrained run failed.');
-      if (result.result.length > 1_000_000) throw new Error('Constrained run output exceeds the 1000000 character limit.');
+      if (result.result.length > 100_000) throw new Error('Constrained run output exceeds the 100000 character limit.');
       return {
         output: result.result,
         usage: {

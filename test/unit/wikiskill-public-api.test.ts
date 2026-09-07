@@ -93,6 +93,11 @@ describe('WikiSkill public API capabilities', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('rejects an origin that conflicts with the owner identity', async () => {
+    const { service } = harness();
+    await expect(service.api.threads.create({ ownerPluginId: 'wiki', origin: 'someone-else' })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
   it('bounds message content retained in public snapshots and run state', async () => {
     const { service, threads, emit } = harness();
     const { threadId } = await service.api.threads.create({ title: 'Bounded' });
@@ -113,6 +118,13 @@ describe('WikiSkill public API capabilities', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(cancelled.status).toBe('cancelled');
     await expect(first.service.api.constrainedRuns.get(created.runId)).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
+  it('caps serialized persisted state and evicts correlation pairs atomically', async () => {
+    const { service, query, getState } = harness(); query.mockResolvedValue({ output: 'x'.repeat(100_000), usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 } });
+    for (let i = 0; i < 12; i++) { const { runId } = await service.api.constrainedRuns.create({ ownerPluginId: 'wiki', idempotencyKey: `large-${i}`, harness: 'claude', model: 'haiku', systemInstructions: 'Grade.', prompt: 'fixture', maxTurns: 1, maxBudgetUsd: 0.1, timeoutMs: 1_000 }); await service.api.constrainedRuns.wait(runId); }
+    const state = getState()!; expect(new TextEncoder().encode(JSON.stringify(state)).byteLength).toBeLessThanOrEqual(1024 * 1024);
+    const ids = new Set(Object.keys(state.constrained)); for (const value of Object.values(state.constrainedKeys)) expect(ids.has(typeof value === 'string' ? value : value.resourceId)).toBe(true);
   });
 
   it('settles constrained waiters when the API generation stops', async () => {
@@ -162,6 +174,7 @@ describe('WikiSkill public API capabilities', () => {
     const tail = await service.api.traces.readChunk(source.sourceId, { cursor: chunk.nextCursor, limit: 2 });
     expect(tail.events).toHaveLength(2);
     expect(tail.eof).toBe(true);
+    expect(tail.nextCursor).toMatch(/^ct1:/);
     await expect(service.api.traces.readChunk(source.sourceId, { cursor: 'ct1:not-json' })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
   });
 
@@ -177,7 +190,16 @@ describe('WikiSkill public API capabilities', () => {
     const { service } = harness(undefined, entries);
     const { threadId } = await service.api.threads.create({ title: 'Attribution' });
     const chunk = await service.api.traces.readChunk(threadId, { limit: 6 });
-    expect(chunk.events.map(event => event.invokedSkill)).toEqual(['integration-routing', undefined, undefined, undefined, undefined, undefined]);
+    expect(chunk.events.map(event => event.invokedSkill)).toEqual(['integration-routing', 'integration-routing', undefined, undefined, undefined, undefined]);
+    expect(chunk.events[1]).toMatchObject({ invokedSkill: 'integration-routing', skillOutcome: 'success' });
+  });
+
+  it('redacts common local path forms in nested multiline trace strings', async () => {
+    const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md\ntwo C:\\Users\\rick\\secret.txt\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt' }] } } }];
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Paths' });
+    const json = JSON.stringify(await service.api.traces.readChunk(threadId));
+    for (const bait of ['/Users/rick', 'Users\\\\rick', '~/vault', 'file:///private']) expect(json).not.toContain(bait);
+    expect(json).toContain('[PATH]');
   });
 
   it('pages trace source metadata and validates finite positive limits', async () => {
@@ -195,6 +217,12 @@ describe('WikiSkill public API capabilities', () => {
     await expect(service.api.traces.listSources({ limit: 0 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(service.api.traces.listSources({ limit: Number.POSITIVE_INFINITY })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(service.api.traces.readChunk(first.sources[0].sourceId, { limit: 1.5 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('uses a stable after-source cursor when earlier sources disappear', async () => {
+    const { service, threads } = harness(); for (const title of ['One', 'Two', 'Three']) await service.api.threads.create({ title });
+    const first = await service.api.traces.listSources({ limit: 1 }); threads.delete(first.sources[0].sourceId);
+    expect((await service.api.traces.listSources({ cursor: first.nextCursor, limit: 10 })).sources).toHaveLength(2);
   });
 
   it('binds trace cursors to source and revision', async () => {

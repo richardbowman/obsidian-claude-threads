@@ -258,4 +258,27 @@ describe('RawLogWriter trace streaming', () => {
     const truncated = await w.getTraceMetadata('revision');
     expect(truncated?.revision).not.toBe(initial?.revision);
   });
+
+  it('streams a valid JSONL line larger than 64 KiB without wedging', async () => {
+    const w = makeWriter(); const file = path.join(tmpRoot, 'Claude', 'logs', 'oversized.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ ts: '1', threadId: 'oversized', type: 'assistant', event: { text: 'x'.repeat(70_000) } }) + '\n');
+    const chunk = await w.readTraceChunk('oversized', { byteOffset: 0, eventIndex: 0, limit: 1 });
+    expect(chunk?.entries).toHaveLength(1); expect(chunk?.eof).toBe(true);
+  });
+
+  it('skips a line beyond the semantic maximum and advances', async () => {
+    const w = makeWriter(); const file = path.join(tmpRoot, 'Claude', 'logs', 'too-large.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'x'.repeat(1_100_000) + '\n' + JSON.stringify({ ts: '2', threadId: 'too-large', type: 'assistant', event: { ok: true } }) + '\n');
+    const chunk = await w.readTraceChunk('too-large', { byteOffset: 0, eventIndex: 0, limit: 1 });
+    expect(chunk?.entries.map(e => e.event)).toEqual([{ ok: true }]); expect(chunk?.eof).toBe(true);
+  });
+
+  it('changes revision across restart after an in-place rewrite', async () => {
+    const w = makeWriter(); w.append('restart', undefined, 'assistant', { value: 'one' }); await settle(w);
+    const initial = await w.getTraceMetadata('restart'); const file = path.join(tmpRoot, 'Claude', 'logs', 'restart.jsonl');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('one', 'two'));
+    expect((await makeWriter().getTraceMetadata('restart'))?.revision).not.toBe(initial?.revision);
+  });
 });

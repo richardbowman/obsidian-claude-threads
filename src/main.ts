@@ -1924,7 +1924,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
       ].filter((value): value is string => Boolean(value)),
       getPublicState: () => this.settings.publicApiState,
       savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
-      runConstrainedQuery: createConstrainedQueryRunner(() => this.settings),
+      runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
       openThread: (id) => this.openThreadInChatView(id),
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),
