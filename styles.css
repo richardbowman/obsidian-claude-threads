@@ -3072,11 +3072,14 @@
   color: var(--text-muted);
 }
 .ct-agents-stack-title-row {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
 }
 .ct-agents-stack-count {
+  flex: 0 0 auto;
   background: var(--background-modifier-border);
   color: var(--text-muted);
 }

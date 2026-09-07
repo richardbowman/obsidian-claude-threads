@@ -2483,6 +2483,39 @@ test.describe('Agent Threads UI', () => {
     expect(await page.locator('.menu .menu-item').allInnerTexts()).toEqual(['Archive these 3 runs']);
   });
 
+  test('agents list — long scheduled-job names truncate without hiding row controls', async ({ page }) => {
+    await page.setViewportSize({ width: 1240, height: 844 });
+    await page.goto(kanbanUrl + '?dashboard=1');
+    await page.waitForSelector('.ct-agents-row-scheduled-stack');
+    await page.evaluate(() => {
+      const manager = (window as any).__manager;
+      for (const thread of manager.getThreads()) {
+        if (thread.scheduledItemId === 'sched-hourly-triage') {
+          thread.scheduledItemName = 'HipTrip Experiment Watchdog With An Intentionally Long Scheduled Job Name';
+        }
+      }
+      (window as any).__dashboard.render();
+    });
+    await page.locator('#app').evaluate(host => { host.style.width = '280px'; });
+
+    const list = page.locator('.ct-agents-list');
+    const row = page.locator('.ct-agents-row-scheduled-stack').first();
+    const title = row.locator('.ct-agents-row-title-text');
+    await expect(title).toBeVisible();
+    await expect(title).toHaveCSS('white-space', 'nowrap');
+    await expect(title).toHaveCSS('text-overflow', 'ellipsis');
+    expect(await title.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+    await expect(row.locator('.ct-agents-stack-count')).toBeVisible();
+    await expect(row.locator('.ct-agents-row-time')).toBeVisible();
+    await expect(row.locator('.ct-expand-btn')).toBeVisible();
+    expect(await list.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    expect(await row.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+
+    await shot(row, 'agent-dashboard-scheduled-row-narrow.png');
+    await row.click();
+    await expect(page.locator('.ct-agents-stack-body .ct-agents-row')).toHaveCount(3);
+  });
+
   for (const { width, height } of [
     { width: 375, height: 667 },
     { width: 390, height: 844 },
