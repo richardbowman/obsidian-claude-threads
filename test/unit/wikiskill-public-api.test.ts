@@ -191,7 +191,21 @@ describe('WikiSkill public API capabilities', () => {
     const { threadId } = await service.api.threads.create({ title: 'Attribution' });
     const chunk = await service.api.traces.readChunk(threadId, { limit: 6 });
     expect(chunk.events.map(event => event.invokedSkill)).toEqual(['integration-routing', 'integration-routing', undefined, undefined, undefined, undefined]);
-    expect(chunk.events[1]).toMatchObject({ invokedSkill: 'integration-routing', skillOutcome: 'success' });
+    expect(chunk.events[1]).toMatchObject({ invokedSkill: 'integration-routing', skillLoadOutcome: 'loaded' });
+  });
+
+  it.each([
+    ['success', { subtype: 'success', is_error: false }, 'success'],
+    ['failure', { subtype: 'error_during_execution', is_error: true }, 'failure'],
+  ] as const)('projects a verified skill invocation onto the terminal %s run outcome', async (_label, terminal, expected) => {
+    const entries = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'skill-run', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'skill-run', content: 'loaded' }] } } },
+      { ts: '3', type: 'result', event: terminal },
+    ];
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Outcome' });
+    const terminalChunk = await service.api.traces.readChunk(threadId, { cursor: (await service.api.traces.readChunk(threadId, { limit: 2 })).nextCursor, limit: 1 });
+    expect(terminalChunk.events[0].skillRunOutcomes).toEqual([{ invokedSkill: 'integration-routing', runOutcome: expected, invocationIndex: 0 }]);
   });
 
   it('redacts common local path forms in nested multiline trace strings', async () => {

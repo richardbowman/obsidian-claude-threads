@@ -29,7 +29,8 @@ export interface Disposable { dispose(): void }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
 export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
 export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
-export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillOutcome?: 'success'; readonly data: unknown }
+export interface SkillRunOutcome { readonly invokedSkill: string; readonly runOutcome: 'success' | 'failure'; readonly invocationIndex: number }
+export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillLoadOutcome?: 'loaded'; readonly skillRunOutcomes?: readonly SkillRunOutcome[]; readonly data: unknown }
 export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
 export type PublicTraceEvent = { readonly kind: 'trace.updated' | 'trace.removed'; readonly sourceId: string; readonly revision: string; readonly at: number };
 export interface ConstrainedRunInput extends CorrelationInput { readonly ownerPluginId: string; readonly idempotencyKey: string; readonly harness: 'claude'; readonly model: string; readonly systemInstructions: string; readonly prompt: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }
@@ -317,6 +318,18 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const next = start + page.length;
     return freeze({ sources, nextCursor: next < values.length && page.length ? sourcePageCursor(page.at(-1)!.id) : undefined, eof: next >= values.length });
   };
+  const terminalSkillOutcomes = async (sourceId: string, endByteOffset: number, terminalEventIndex: number, sessionId: string | undefined, registeredNames: readonly string[], runOutcome: 'success' | 'failure'): Promise<readonly SkillRunOutcome[]> => {
+    const entries: RawLogTraceChunk['entries'] = []; const sourceIndexes: number[] = []; let byteOffset = 0; let eventIndex = 0;
+    while (byteOffset < endByteOffset && entries.length < 10_000) {
+      const page = await deps.readTraceChunk?.(sourceId, { byteOffset, eventIndex, limit: Math.min(500, 10_000 - entries.length) });
+      if (!page || page.nextByteOffset <= byteOffset) break;
+      page.entries.forEach((entry, offset) => { const index = eventIndex + offset; if (index <= terminalEventIndex && (sessionId === undefined || entry.sessionId === sessionId)) { entries.push(entry); sourceIndexes.push(index); } });
+      byteOffset = page.nextByteOffset; eventIndex = page.nextEventIndex;
+    }
+    if (byteOffset < endByteOffset) return [];
+    const verified = verifiedInvokedSkills(entries, registeredNames);
+    return freeze([...verified.skills.entries()].filter(([index]) => !verified.outcomes.has(index)).map(([index, invokedSkill]) => freeze({ invokedSkill, runOutcome, invocationIndex: sourceIndexes[index] })));
+  };
   const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => {
     guard();
     const thread = deps.getThread(sourceId);
@@ -332,13 +345,22 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     if (raw.metadata.revision !== metadata.revision) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
     const lookahead = raw.eof ? null : await deps.readTraceChunk?.(sourceId, { byteOffset: raw.nextByteOffset, eventIndex: raw.nextEventIndex, limit: 32 }) ?? null;
     const attributionEntries = [...raw.entries, ...(lookahead?.entries ?? [])];
-    const invokedSkills = verifiedInvokedSkills(attributionEntries, await deps.getRegisteredSkillNames?.() ?? []);
+    const registeredNames = await deps.getRegisteredSkillNames?.() ?? [];
+    const invokedSkills = verifiedInvokedSkills(attributionEntries, registeredNames);
     const secrets = deps.getRedactionSecrets?.() ?? [];
     const events = raw.entries.map((entry, offset) => {
       const type = String(entry.type ?? 'unknown');
       const invokedSkill = invokedSkills.skills.get(offset);
-      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillOutcome: 'success' as const } : {}), data: projectTraceData(type, entry.event, secrets) });
+      const result = entry.event && typeof entry.event === 'object' ? entry.event as Record<string, unknown> : {};
+      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), ...(invokedSkills.outcomes.has(offset) ? { skillLoadOutcome: 'loaded' as const } : {}), ...((type === 'result') ? { skillRunOutcomes: [] as readonly SkillRunOutcome[], __terminal: { outcome: result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const, sessionId: entry.sessionId } } : {}), data: projectTraceData(type, entry.event, secrets) });
     });
+    for (let offset = 0; offset < raw.entries.length; offset++) {
+      if (raw.entries[offset].type !== 'result') continue;
+      const event = events[offset] as TraceEvent & { __terminal?: { outcome: 'success' | 'failure'; sessionId?: string } };
+      const terminal = event.__terminal!;
+      const skillRunOutcomes = await terminalSkillOutcomes(sourceId, raw.nextByteOffset, event.index, terminal.sessionId, registeredNames, terminal.outcome);
+      events[offset] = freeze({ index: event.index, timestamp: event.timestamp, type: event.type, skillRunOutcomes, data: event.data });
+    }
     return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });
   };
   const settleConstrained = async (runId: string, result: ConstrainedRunResult): Promise<ConstrainedRunResult> => {
