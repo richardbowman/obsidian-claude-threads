@@ -1,5 +1,6 @@
 import type { ChatMessage, Thread, ThreadStatus } from './types';
 import type { ThreadEvent } from './ThreadManager';
+import type { RawLogTraceChunk, RawLogTraceMetadata } from './RawLogWriter';
 
 export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
 export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
@@ -26,7 +27,8 @@ export type PublicThreadEvent =
   | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };
 export interface Disposable { dispose(): void }
 export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
-export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly updatedAt: number }
+export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: 'claude' | 'codex'; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
+export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
 export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly data: unknown }
 export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor?: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
 export type PublicTraceEvent = { readonly kind: 'trace.updated' | 'trace.removed'; readonly sourceId: string; readonly revision: string; readonly at: number };
@@ -51,7 +53,7 @@ export interface ClaudeThreadsApiV1 {
     create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>;
     wait(runId: string, options?: WaitOptions): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable;
   };
-  readonly traces: { listSources(): Promise<readonly TraceSource[]>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
+  readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
   readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: WaitOptions): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
   readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: OrchestratorTarget, input: SendInput): Promise<{ readonly runId: string }> };
   readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
@@ -59,7 +61,9 @@ export interface ClaudeThreadsApiV1 {
 export interface PublicApiDependencies {
   getThreads(): Thread[]; getThread(id: string): Thread | undefined; isRunning(id: string): boolean; createThread(input: CreateThreadInput): Thread | Promise<Thread>;
   sendMessage(id: string, prompt: string): Promise<void>; openThread(id: string): Promise<void>; subscribe(listener: (threadId: string, event: ThreadEvent) => void): () => void;
-  interruptThread?(id: string): Promise<void>; readRawLog?(id: string): Promise<{ total: number; entries: unknown[] } | null>;
+  interruptThread?(id: string): Promise<void>;
+  getTraceMetadata?(id: string): Promise<RawLogTraceMetadata | null>;
+  readTraceChunk?(id: string, options: { byteOffset: number; eventIndex: number; limit: number }): Promise<RawLogTraceChunk | null>;
   getRedactionSecrets?(): readonly string[];
   getPublicState?(): PublicApiPersistedState | undefined; savePublicState?(state: PublicApiPersistedState): Promise<void>;
   runConstrainedQuery?(input: ConstrainedQueryInput): Promise<ConstrainedQueryOutput>;
@@ -111,12 +115,26 @@ function correlatedId(value: string | CorrelatedResource | undefined, expectedFi
   if (value.fingerprint !== expectedFingerprint) throw new ClaudeThreadsApiError('IDEMPOTENCY_CONFLICT', 'The idempotency key was already used with different input.');
   return value.resourceId;
 }
-function traceRevision(thread: Thread): string { return `thread-${thread.createdAt.toString(36)}`; }
-function cursor(index: number, revision: string): string { return `ct1:${btoa(JSON.stringify({ index, revision }))}`; }
-function parseCursor(value: string | undefined, revision: string): number {
+function traceCursor(sourceId: string, revision: string, byteOffset: number, eventIndex: number): string { return `ct1:${btoa(JSON.stringify({ sourceId, revision, byteOffset, eventIndex }))}`; }
+function parseTraceCursor(value: string | undefined, sourceId: string, revision: string): { byteOffset: number; eventIndex: number } {
+  if (!value) return { byteOffset: 0, eventIndex: 0 };
+  try {
+    if (!value.startsWith('ct1:')) throw new Error();
+    const decoded = JSON.parse(atob(value.slice(4))) as { sourceId: string; revision: string; byteOffset: number; eventIndex: number };
+    if (decoded.sourceId !== sourceId || decoded.revision !== revision || !Number.isInteger(decoded.byteOffset) || decoded.byteOffset < 0 || !Number.isInteger(decoded.eventIndex) || decoded.eventIndex < 0) throw new Error();
+    return { byteOffset: decoded.byteOffset, eventIndex: decoded.eventIndex };
+  } catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); }
+}
+function sourcePageCursor(index: number): string { return `cts1:${btoa(JSON.stringify({ index }))}`; }
+function parseSourcePageCursor(value: string | undefined): number {
   if (!value) return 0;
-  try { const decoded = JSON.parse(atob(value.replace(/^ct1:/, ''))) as { index: number; revision: string }; if (!Number.isInteger(decoded.index) || decoded.index < 0 || decoded.revision !== revision) throw new Error(); return decoded.index; }
-  catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); }
+  try { if (!value.startsWith('cts1:')) throw new Error(); const decoded = JSON.parse(atob(value.slice(5))) as { index: number }; if (!Number.isInteger(decoded.index) || decoded.index < 0) throw new Error(); return decoded.index; }
+  catch { throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source cursor is invalid.'); }
+}
+function positiveLimit(value: number | undefined, fallback: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit <= 0 || limit > 500) throw new ClaudeThreadsApiError('INVALID_ARGUMENT', 'limit must be a finite positive integer no greater than 500.');
+  return limit;
 }
 const SENSITIVE_KEY = /(?:token|secret|password|authorization|cookie|rawlogpath|path)$/i;
 const SENSITIVE_VALUE = /\b(?:token|secret|password|authorization)\s*[:=]\s*[^\s,;]+/gi;
@@ -158,12 +176,6 @@ function invokedSkillFromTrace(type: string, raw: unknown): string | undefined {
     if (typeof skill === 'string' && skill.trim()) return skill.trim();
   }
   return undefined;
-}
-async function traceContentHash(entries: readonly unknown[], secrets: readonly string[]): Promise<string> {
-  const projection = entries.map(item => { const entry = item as Record<string, unknown>; const type = String(entry.type ?? 'unknown'); return [type, invokedSkillFromTrace(type, entry.event), projectTraceData(type, entry.event, secrets)]; });
-  const bytes = new TextEncoder().encode(JSON.stringify(projection));
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 function snapshotThread(thread: Thread, running: boolean): ThreadSnapshot { return freeze({ ...snapshotSummary(thread, running), messages: thread.messages.map(snapshotMessage) }); }
 function stringProp(): Record<string, unknown> { return { type: 'string' }; }
@@ -222,9 +234,15 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     const traceThread = deps.getThread(threadId);
     if (traceThread && !traceThread.origin) eligibleTraceIds.add(threadId);
     const traceChanged = event.type === 'message' || event.type === 'done' || event.type === 'error' || event.type === 'interrupted';
-    if ((traceChanged && traceThread && eligibleTraceIds.has(threadId)) || (event.type === 'thread_deleted' && eligibleTraceIds.delete(threadId))) {
-      const update = freeze({ kind: event.type === 'thread_deleted' ? 'trace.removed' as const : 'trace.updated' as const, sourceId: threadId, revision: traceThread ? traceRevision(traceThread) : 'removed', at: Date.now() });
+    if (event.type === 'thread_deleted' && eligibleTraceIds.delete(threadId)) {
+      const update = freeze({ kind: 'trace.removed' as const, sourceId: threadId, revision: 'removed', at: Date.now() });
       for (const listener of [...traceListeners]) { try { listener(update); } catch (error) { console.error('[ClaudeThreads] Public trace listener failed:', error); } }
+    } else if (traceChanged && traceThread && eligibleTraceIds.has(threadId)) {
+      void deps.getTraceMetadata?.(threadId).then(metadata => {
+        if (!active || !metadata) return;
+        const update = freeze({ kind: 'trace.updated' as const, sourceId: threadId, revision: metadata.revision, at: Date.now() });
+        for (const listener of [...traceListeners]) { try { listener(update); } catch (error) { console.error('[ClaudeThreads] Public trace listener failed:', error); } }
+      }).catch(error => console.error('[ClaudeThreads] Public trace metadata read failed:', error));
     }
     if (event.type === 'message' && event.message.role === 'assistant') publish({ kind: 'message.completed', threadId, runId: latestRunByThread.get(threadId), message: snapshotMessage(event.message), at: Date.now() });
     else if (event.type === 'done') { const finalMessage = lastAssistant(threadId); const snapshot = deps.getThread(threadId)?.usageSnapshot; const usage = snapshot ? freeze({ inputTokens: snapshot.tokens?.input ?? 0, outputTokens: snapshot.tokens?.output ?? 0, costUsd: snapshot.estimatedCostUsd ?? 0, turns: snapshot.turns }) : undefined; for (const record of activeRuns(threadId)) void settle(record, { status: 'completed', runId: record.runId, threadId, finalMessage, usage }).then(() => publish({ kind: 'run.completed', threadId, runId: record.runId, finalMessage, at: Date.now() })); }
@@ -254,8 +272,43 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
   };
   const list = async (query?: ThreadQuery): Promise<readonly ThreadSummary[]> => { guard(); let values = deps.getThreads(); if (query?.projectId !== undefined) values = values.filter(thread => (thread.projectId ?? null) === query.projectId); if (query?.status) values = values.filter(thread => (thread.status ?? 'waiting') === query.status); if (query?.limit !== undefined) values = values.slice(0, Math.max(0, Math.floor(query.limit))); return freeze(values.map(thread => snapshotSummary(thread, deps.isRunning(thread.id)))); };
   const get = async (threadId: string): Promise<ThreadSnapshot | null> => { guard(); const thread = deps.getThread(threadId); return thread ? snapshotThread(thread, deps.isRunning(threadId)) : null; };
-  const listTraceSources = async (): Promise<readonly TraceSource[]> => { guard(); const values = deps.getThreads().filter(thread => !thread.origin); const secrets = deps.getRedactionSecrets?.() ?? []; const candidates: Array<TraceSource | null> = await Promise.all(values.map(async thread => { const raw = await deps.readRawLog?.(thread.id); return raw ? freeze({ sourceId: thread.id, threadId: thread.id, projectId: thread.projectId, harness: thread.agentHarness ?? 'claude', revision: traceRevision(thread), contentHash: await traceContentHash(raw.entries, secrets), updatedAt: thread.updatedAt }) : null; })); return freeze(candidates.filter((source): source is TraceSource => source !== null)); };
-  const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => { guard(); const thread = deps.getThread(sourceId); if (!thread || thread.origin) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.'); const raw = await deps.readRawLog?.(sourceId); if (!raw) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.'); const revision = traceRevision(thread); const start = parseCursor(options?.cursor, revision); const limit = Math.max(1, Math.min(Math.floor(options?.limit ?? 100), 500)); const source = raw.entries.slice(start, start + limit) as Array<Record<string, unknown>>; const secrets = deps.getRedactionSecrets?.() ?? []; const events = source.map((entry, offset) => { const type = String(entry.type ?? 'unknown'); const invokedSkill = invokedSkillFromTrace(type, entry.event); return freeze({ index: start + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), data: projectTraceData(type, entry.event, secrets) }); }); const next = start + events.length; return freeze({ sourceId, revision, contentHash: await traceContentHash(raw.entries, secrets), cursor: options?.cursor, nextCursor: next < raw.total ? cursor(next, revision) : undefined, eof: next >= raw.total, events }); };
+  const listTraceSources = async (options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage> => {
+    guard();
+    const limit = positiveLimit(options?.limit, 100);
+    const values = deps.getThreads().filter(thread => !thread.origin);
+    const start = parseSourcePageCursor(options?.cursor);
+    if (start > values.length) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source cursor is invalid.');
+    const page = values.slice(start, start + limit);
+    const sources: TraceSource[] = [];
+    for (const thread of page) {
+      const metadata = await deps.getTraceMetadata?.(thread.id);
+      if (!metadata) continue;
+      sources.push(freeze({ sourceId: thread.id, threadId: thread.id, projectId: thread.projectId, harness: thread.agentHarness ?? 'claude', revision: metadata.revision, contentHash: metadata.contentHash, byteLength: metadata.byteLength, updatedAt: metadata.updatedAt }));
+    }
+    const next = start + page.length;
+    return freeze({ sources, nextCursor: next < values.length ? sourcePageCursor(next) : undefined, eof: next >= values.length });
+  };
+  const readTraceChunk = async (sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk> => {
+    guard();
+    const thread = deps.getThread(sourceId);
+    if (!thread || thread.origin) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.');
+    const limit = positiveLimit(options?.limit, 100);
+    const metadata = await deps.getTraceMetadata?.(sourceId);
+    if (!metadata) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.');
+    const position = parseTraceCursor(options?.cursor, sourceId, metadata.revision);
+    let raw: RawLogTraceChunk | null;
+    try { raw = await deps.readTraceChunk?.(sourceId, { ...position, limit }) ?? null; }
+    catch (error) { if (error instanceof RangeError) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.'); throw error; }
+    if (!raw) throw new ClaudeThreadsApiError('TRACE_NOT_FOUND', 'Trace source not found.');
+    if (raw.metadata.revision !== metadata.revision) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace cursor is invalid or stale.');
+    const secrets = deps.getRedactionSecrets?.() ?? [];
+    const events = raw.entries.map((entry, offset) => {
+      const type = String(entry.type ?? 'unknown');
+      const invokedSkill = invokedSkillFromTrace(type, entry.event);
+      return freeze({ index: position.eventIndex + offset, timestamp: String(entry.ts ?? ''), type, ...(invokedSkill ? { invokedSkill } : {}), data: projectTraceData(type, entry.event, secrets) });
+    });
+    return freeze({ sourceId, revision: metadata.revision, contentHash: raw.metadata.contentHash, cursor: options?.cursor, nextCursor: raw.eof ? undefined : traceCursor(sourceId, metadata.revision, raw.nextByteOffset, raw.nextEventIndex), eof: raw.eof, events });
+  };
   const settleConstrained = async (runId: string, result: ConstrainedRunResult): Promise<ConstrainedRunResult> => {
     const current = persisted.constrained[runId];
     if (current && current.status !== 'running') return current;

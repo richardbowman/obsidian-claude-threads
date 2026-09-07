@@ -1,7 +1,7 @@
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
-import { RawLogWriter } from './RawLogWriter';
+import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { AttachmentWriter } from './AttachmentWriter';
 import { collectPendingImageExternalizations } from './imageExternalization';
 import { effectiveExtraEnv } from './types';
@@ -292,6 +292,17 @@ export class ThreadManager {
     opts?: { limit?: number; type?: string },
   ): Promise<{ path: string; total: number; returned: number; entries: unknown[] } | null> {
     return this.rawLogWriter.read(threadId, opts);
+  }
+
+  getRawLogTraceMetadata(threadId: string): Promise<RawLogTraceMetadata | null> {
+    return this.rawLogWriter.getTraceMetadata(threadId);
+  }
+
+  readRawLogTraceChunk(
+    threadId: string,
+    options: { byteOffset: number; eventIndex: number; limit: number },
+  ): Promise<RawLogTraceChunk | null> {
+    return this.rawLogWriter.readTraceChunk(threadId, options);
   }
 
   /**

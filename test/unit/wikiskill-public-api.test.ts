@@ -10,23 +10,31 @@ function harness(initial?: PublicApiPersistedState) {
     expect(input.options).toMatchObject({ model: 'haiku', systemInstructions: 'Grade output.', maxTurns: 1, maxBudgetUsd: 0.1, timeoutMs: 1_000 });
     return { output: 'evaluated', usage: { inputTokens: 4, outputTokens: 2, costUsd: 0.01, durationMs: 12, turns: 1 } };
   });
+  const rawEntries = (id: string) => [
+    { ts: '2026-01-01T00:00:00Z', threadId: id, type: 'user', event: { message: 'token=secret-value invoke Skill spoofed-skill', rawLogPath: '/private/path' } },
+    { ts: '2026-01-01T00:00:01Z', threadId: id, type: 'assistant', event: { message: { content: [
+      { type: 'text', text: 'safe output api-xyz-123 Skill text-spoof' },
+      { type: 'tool_use', name: 'Skill', input: { skill: 'integration-routing' } },
+    ] } } },
+    { ts: '2026-01-01T00:00:02Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
+  ];
+  let traceRevision = 'revision-1';
+  const getTraceMetadata = vi.fn(async (id: string) => threads.has(id) ? ({ sourceId: id, revision: traceRevision, contentHash: 'a'.repeat(64), byteLength: 3, updatedAt: 3 }) : null);
+  const readTraceChunk = vi.fn(async (id: string, options: any) => {
+    const entries = rawEntries(id).slice(options.byteOffset, options.byteOffset + options.limit);
+    const nextByteOffset = options.byteOffset + entries.length;
+    return { metadata: await getTraceMetadata(id), entries, nextByteOffset, nextEventIndex: options.eventIndex + entries.length, eof: nextByteOffset >= 3, bytesRead: entries.length, readCalls: 1 };
+  });
   const service = createClaudeThreadsApiV1({
     getThreads: () => [...threads.values()], getThread: (id) => threads.get(id), isRunning: (id) => threads.get(id)?.status === 'active',
     createThread: (input) => { const t = { id: `t-${threads.size + 1}`, title: input.title ?? 'Thread', status: 'waiting', reviewed: false,
       messages: [], createdAt: 1, updatedAt: 1, cwd: '/vault', agentHarness: 'claude', ...input }; threads.set(t.id, t); return t; },
     sendMessage: vi.fn(async (id) => { threads.get(id).status = 'active'; }), interruptThread: vi.fn(async (id) => { threads.get(id).status = 'waiting'; }),
     openThread: vi.fn(async () => {}), subscribe: (listener: any) => { listeners.add(listener); return () => listeners.delete(listener); }, listOrchestrators: () => [], resolveOrchestrator: async () => null,
-    triggerHostEvent: () => {}, readRawLog: async (id) => ({ total: 3, entries: [
-      { ts: '2026-01-01T00:00:00Z', threadId: id, type: 'user', event: { message: 'token=secret-value invoke Skill spoofed-skill', rawLogPath: '/private/path' } },
-      { ts: '2026-01-01T00:00:01Z', threadId: id, type: 'assistant', event: { message: { content: [
-        { type: 'text', text: 'safe output api-xyz-123 Skill text-spoof' },
-        { type: 'tool_use', name: 'Skill', input: { skill: 'integration-routing' } },
-      ] } } },
-      { ts: '2026-01-01T00:00:02Z', threadId: id, type: 'result', event: { total_cost_usd: 0.01, usage: { input_tokens: 4 } } },
-    ] }),
+    triggerHostEvent: () => {}, getTraceMetadata, readTraceChunk,
     getRedactionSecrets: () => ['api-xyz-123'], getPublicState: () => state, savePublicState: async (next) => { state = structuredClone(next); }, runConstrainedQuery: query,
   } as any);
-  return { service, threads, query, emit, getState: () => state };
+  return { service, threads, query, emit, getState: () => state, getTraceMetadata, setTraceRevision: (value: string) => { traceRevision = value; } };
 }
 
 describe('WikiSkill public API capabilities', () => {
@@ -121,7 +129,7 @@ describe('WikiSkill public API capabilities', () => {
     const second = await service.api.threads.create(input);
     expect(second).toEqual(first);
     expect(threads.size).toBe(1);
-    expect(await service.api.traces.listSources()).toEqual([]);
+    expect(await service.api.traces.listSources()).toEqual({ sources: [], eof: true });
   });
 
   it('rejects concurrent sends, supports idempotent retry, and can cancel', async () => {
@@ -136,7 +144,7 @@ describe('WikiSkill public API capabilities', () => {
   it('lists and reads bounded immutable sanitized trace chunks with opaque cursors', async () => {
     const { service } = harness();
     const { threadId } = await service.api.threads.create({ title: 'Eligible' });
-    const [source] = await service.api.traces.listSources();
+    const { sources: [source] } = await service.api.traces.listSources();
     expect(source).toMatchObject({ sourceId: threadId, threadId });
     expect(source.contentHash).toMatch(/^[a-f0-9]{64}$/);
     expect(source).not.toHaveProperty('rawLogPath');
@@ -156,7 +164,34 @@ describe('WikiSkill public API capabilities', () => {
     await expect(service.api.traces.readChunk(source.sourceId, { cursor: 'ct1:not-json' })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
   });
 
-  it('announces eligible trace changes and fences WikiSkill-origin trace events', async () => {
+  it('pages trace source metadata and validates finite positive limits', async () => {
+    const { service, getTraceMetadata } = harness();
+    for (const title of ['One', 'Two', 'Three']) await service.api.threads.create({ title });
+
+    const first = await service.api.traces.listSources({ limit: 2 });
+    expect(first.sources).toHaveLength(2);
+    expect(first.nextCursor).toMatch(/^cts1:/);
+    expect(first.eof).toBe(false);
+    expect(getTraceMetadata).toHaveBeenCalledTimes(2);
+    const second = await service.api.traces.listSources({ cursor: first.nextCursor, limit: 2 });
+    expect(second.sources).toHaveLength(1);
+    expect(second.eof).toBe(true);
+    await expect(service.api.traces.listSources({ limit: 0 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(service.api.traces.listSources({ limit: Number.POSITIVE_INFINITY })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(service.api.traces.readChunk(first.sources[0].sourceId, { limit: 1.5 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('binds trace cursors to source and revision', async () => {
+    const { service, setTraceRevision } = harness();
+    const one = await service.api.threads.create({ title: 'One' });
+    const two = await service.api.threads.create({ title: 'Two' });
+    const chunk = await service.api.traces.readChunk(one.threadId, { limit: 1 });
+    await expect(service.api.traces.readChunk(two.threadId, { cursor: chunk.nextCursor, limit: 1 })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
+    setTraceRevision('revision-2');
+    await expect(service.api.traces.readChunk(one.threadId, { cursor: chunk.nextCursor, limit: 1 })).rejects.toMatchObject({ code: 'CURSOR_INVALID' });
+  });
+
+  it('announces eligible trace changes with the source revision and fences WikiSkill-origin trace events', async () => {
     const { service, emit } = harness();
     const eligible = await service.api.threads.create({ title: 'Eligible' });
     const excluded = await service.api.threads.create({ title: 'Managed', origin: 'geode-wikiskill' });
@@ -164,8 +199,8 @@ describe('WikiSkill public API capabilities', () => {
     service.api.traces.subscribe(event => events.push(event));
     emit(eligible.threadId, { type: 'done' });
     emit(excluded.threadId, { type: 'done' });
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ kind: 'trace.updated', sourceId: eligible.threadId });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]).toMatchObject({ kind: 'trace.updated', sourceId: eligible.threadId, revision: 'revision-1' });
   });
 
   it('reconciles a persisted in-flight thread run as interrupted after reload', async () => {

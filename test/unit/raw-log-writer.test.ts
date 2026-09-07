@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -191,5 +191,71 @@ describe('RawLogWriter.read', () => {
     const res = await w.read('r4');
     expect(res!.total).toBe(1);
     expect(res!.entries[0].type).toBe('assistant');
+  });
+});
+
+describe('RawLogWriter trace streaming', () => {
+  it('pages metadata without reading log contents', async () => {
+    const w = makeWriter();
+    w.append('meta', undefined, 'assistant', { value: 'visible' });
+    await settle(w);
+    const readFile = vi.spyOn(fs.promises, 'readFile');
+
+    const metadata = await w.getTraceMetadata('meta');
+
+    expect(metadata).toMatchObject({ sourceId: 'meta', byteLength: expect.any(Number), revision: expect.any(String), contentHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(readFile).not.toHaveBeenCalled();
+    readFile.mockRestore();
+  });
+
+  it('reads a bounded JSONL chunk by byte offset without readFile', async () => {
+    const w = makeWriter();
+    const file = path.join(tmpRoot, 'Claude', 'logs', 'large.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, [...Array(5_000).keys()].map(i => JSON.stringify({ ts: '2026-01-01T00:00:00Z', threadId: 'large', type: 'assistant', event: { i, padding: 'x'.repeat(120) } })).join('\n') + '\n');
+    const readFile = vi.spyOn(fs.promises, 'readFile');
+
+    const chunk = await w.readTraceChunk('large', { byteOffset: 0, eventIndex: 0, limit: 10 });
+
+    expect(chunk?.entries).toHaveLength(10);
+    expect(chunk?.entries.map(entry => (entry.event as { i: number }).i)).toEqual([...Array(10).keys()]);
+    expect(chunk!.bytesRead).toBeLessThanOrEqual(64 * 1024);
+    expect(chunk!.readCalls).toBe(1);
+    expect(chunk!.nextByteOffset).toBeLessThan(chunk!.metadata.byteLength);
+    expect(readFile).not.toHaveBeenCalled();
+    readFile.mockRestore();
+  });
+
+  it('skips malformed streamed lines while preserving valid event indexes', async () => {
+    const w = makeWriter();
+    w.append('malformed', undefined, 'assistant', { i: 0 });
+    await settle(w);
+    const file = path.join(tmpRoot, 'Claude', 'logs', 'malformed.jsonl');
+    fs.appendFileSync(file, 'not json\n', 'utf8');
+    w.append('malformed', undefined, 'assistant', { i: 1 });
+    await settle(w);
+
+    const chunk = await w.readTraceChunk('malformed', { byteOffset: 0, eventIndex: 0, limit: 10 });
+
+    expect(chunk?.entries.map(entry => (entry.event as { i: number }).i)).toEqual([0, 1]);
+    expect(chunk?.nextEventIndex).toBe(2);
+    expect(chunk?.eof).toBe(true);
+  });
+
+  it('changes revision when a source is truncated but not when appended', async () => {
+    const w = makeWriter();
+    w.append('revision', undefined, 'assistant', { i: 0 });
+    await settle(w);
+    const initial = await w.getTraceMetadata('revision');
+    w.append('revision', undefined, 'assistant', { i: 1 });
+    await settle(w);
+    const appended = await w.getTraceMetadata('revision');
+    expect(appended?.revision).toBe(initial?.revision);
+    expect(appended?.contentHash).not.toBe(initial?.contentHash);
+
+    const file = path.join(tmpRoot, 'Claude', 'logs', 'revision.jsonl');
+    fs.truncateSync(file, 0);
+    const truncated = await w.getTraceMetadata('revision');
+    expect(truncated?.revision).not.toBe(initial?.revision);
   });
 });
