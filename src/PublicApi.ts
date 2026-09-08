@@ -297,8 +297,9 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     return freeze({ sources, nextCursor: next < values.length && page.length ? sourcePageCursor(page.at(-1)!.id) : undefined, eof: next >= values.length });
   };
   const MAX_SESSION_SKILL_ATTRIBUTIONS = 128;
+  const MAX_RETAINED_SKILL_ATTRIBUTIONS = 512;
   const MAX_INFLIGHT_SOURCE_PROJECTIONS = 32;
-  interface ProjectionState { revision: string; registryFingerprint: string; byteOffset: number; eventIndex: number; overflowed: boolean; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; attributions: Map<number, { skill: string; loaded: boolean }>; terminals: Map<number, readonly SkillRunOutcome[]> }
+  interface ProjectionState { revision: string; registryFingerprint: string; byteOffset: number; eventIndex: number; overflowed: boolean; pending: Map<string, { skill: string; index: number }>; loaded: Array<{ skill: string; index: number }>; sessionAttributionIndexes: Set<number>; attributions: Map<number, { skill: string; loaded: boolean }>; terminals: Map<number, readonly SkillRunOutcome[]> }
   const projectionStates = new Map<string, ProjectionState>();
   const projectionTails = new Map<string, Promise<ProjectionState>>();
   const advanceProjection = async (sourceId: string, revision: string, endByteOffset: number, registeredNames: readonly string[]): Promise<ProjectionState> => {
@@ -306,28 +307,31 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
     let state = projectionStates.get(sourceId);
     if (!state || state.revision !== revision || state.registryFingerprint !== registryFingerprint || state.byteOffset > endByteOffset) {
       if (!state && projectionStates.size >= 100) projectionStates.delete(projectionStates.keys().next().value!);
-      state = { revision, registryFingerprint, byteOffset: 0, eventIndex: 0, overflowed: false, pending: new Map(), loaded: [], attributions: new Map(), terminals: new Map() }; projectionStates.set(sourceId, state);
+      state = { revision, registryFingerprint, byteOffset: 0, eventIndex: 0, overflowed: false, pending: new Map(), loaded: [], sessionAttributionIndexes: new Set(), attributions: new Map(), terminals: new Map() }; projectionStates.set(sourceId, state);
     } else { projectionStates.delete(sourceId); projectionStates.set(sourceId, state); }
-    const registered = new Set(registeredNames);
+    const registered = new Set(registeredNames.map(name => name.trim()).filter(Boolean));
     while (state.byteOffset < endByteOffset) {
       const page = await deps.readTraceChunk?.(sourceId, { byteOffset: state.byteOffset, eventIndex: state.eventIndex, limit: 500 });
       if (!page || page.nextByteOffset <= state.byteOffset) throw new ClaudeThreadsApiError('CURSOR_INVALID', 'The trace source could not make forward progress.');
       page.entries.forEach((entry, offset) => {
         const index = state!.eventIndex + offset;
-        if (entry.type === 'session_start') { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = false; }
+        if (entry.type === 'session_start') { state!.pending.clear(); state!.loaded = []; state!.sessionAttributionIndexes.clear(); state!.overflowed = false; }
         for (const candidate of traceContent(entry.event)) {
           if (!candidate || typeof candidate !== 'object') continue; const block = candidate as Record<string, unknown>;
           if (block.type === 'tool_use' && block.name === 'Skill' && typeof block.id === 'string' && block.input && typeof block.input === 'object') {
             const skill = (block.input as Record<string, unknown>).skill;
             if (!state!.overflowed && typeof skill === 'string' && registered.has(skill.trim())) {
-              if (!state!.pending.has(block.id) && state!.pending.size >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = true; }
+              if (!state!.pending.has(block.id) && state!.pending.size >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; for (const attributedIndex of state!.sessionAttributionIndexes) state!.attributions.delete(attributedIndex); state!.sessionAttributionIndexes.clear(); state!.overflowed = true; }
               else state!.pending.set(block.id, { skill: skill.trim(), index });
             }
           } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
             const pending = state!.pending.get(block.tool_use_id); state!.pending.delete(block.tool_use_id);
             if (!state!.overflowed && pending && block.is_error !== true) {
-              if (state!.loaded.length >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; state!.attributions.clear(); state!.overflowed = true; }
-              else { state!.loaded.push(pending); state!.attributions.set(pending.index, { skill: pending.skill, loaded: false }); state!.attributions.set(index, { skill: pending.skill, loaded: true }); }
+              if (state!.loaded.length >= MAX_SESSION_SKILL_ATTRIBUTIONS) { state!.pending.clear(); state!.loaded = []; for (const attributedIndex of state!.sessionAttributionIndexes) state!.attributions.delete(attributedIndex); state!.sessionAttributionIndexes.clear(); state!.overflowed = true; }
+              else {
+                state!.loaded.push(pending); state!.attributions.set(pending.index, { skill: pending.skill, loaded: false }); state!.attributions.set(index, { skill: pending.skill, loaded: true }); state!.sessionAttributionIndexes.add(pending.index); state!.sessionAttributionIndexes.add(index);
+                while (state!.attributions.size > MAX_RETAINED_SKILL_ATTRIBUTIONS) { const oldest = state!.attributions.keys().next().value!; state!.attributions.delete(oldest); state!.sessionAttributionIndexes.delete(oldest); }
+              }
             }
           }
         }
@@ -336,7 +340,7 @@ export function createClaudeThreadsApiV1(deps: PublicApiDependencies): ClaudeThr
           const runOutcome = result.subtype === 'success' && result.is_error !== true ? 'success' as const : 'failure' as const;
           state!.terminals.set(index, state!.overflowed ? freeze([]) : freeze(state!.loaded.map(item => freeze({ invokedSkill: item.skill, runOutcome, invocationIndex: item.index }))));
           while (state!.terminals.size > 500) state!.terminals.delete(state!.terminals.keys().next().value!);
-          state!.pending.clear(); state!.loaded = []; state!.overflowed = false;
+          state!.pending.clear(); state!.loaded = []; state!.sessionAttributionIndexes.clear(); state!.overflowed = false;
         }
       });
       state.byteOffset = page.nextByteOffset; state.eventIndex = page.nextEventIndex;

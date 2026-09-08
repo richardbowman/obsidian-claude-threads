@@ -273,6 +273,30 @@ describe('WikiSkill public API capabilities', () => {
     expect((await service.api.traces.readChunk(threadId)).events[2].skillRunOutcomes).toEqual([]);
   });
 
+  it('preserves prior-page skill fields when lookahead begins a new session', async () => {
+    const entries = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'skill', name: 'Skill', input: { skill: ' integration-routing ' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'skill' }] } } },
+      { ts: '3', type: 'session_start', event: {} },
+    ];
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Boundary' });
+    const page = await service.api.traces.readChunk(threadId, { limit: 2 });
+    expect(page.events.map(event => [event.invokedSkill, event.skillLoadOutcome])).toEqual([['integration-routing', undefined], ['integration-routing', 'loaded']]);
+  });
+
+  it('preserves a prior session page when the following session overflows', async () => {
+    const entries: any[] = [
+      { ts: '1', type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: 'prior', name: 'Skill', input: { skill: 'integration-routing' } }] } } },
+      { ts: '2', type: 'user', event: { message: { content: [{ type: 'tool_result', tool_use_id: 'prior' }] } } },
+      { ts: '3', type: 'session_start', event: {} },
+    ];
+    for (let i = 0; i < 129; i++) entries.push({ ts: String(i + 4), type: 'assistant', event: { message: { content: [{ type: 'tool_use', id: `next-${i}`, name: 'Skill', input: { skill: 'integration-routing' } }] } } });
+    const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Overflow Boundary' });
+    const page = await service.api.traces.readChunk(threadId, { limit: 500 });
+    expect(page.events[0].invokedSkill).toBe('integration-routing'); expect(page.events[1].skillLoadOutcome).toBe('loaded');
+    expect(page.events.slice(3).some(event => event.invokedSkill !== undefined)).toBe(false);
+  });
+
   it('redacts common local path forms in nested multiline trace strings', async () => {
     const entries = [{ ts: '1', type: 'assistant', event: { message: { content: [{ type: 'text', text: 'one /Users/rick/private.md /root/a /usr/bin/x /workspace/a /data/a /Library/a /Applications/a\ntwo C:\\Users\\rick\\secret.txt C:/bait/x \\\\server\\share\\x\nthree ~/vault/note.md\nfour file:///private/tmp/bait.txt https://example.com/public' }] } } }];
     const { service } = harness(undefined, entries); const { threadId } = await service.api.threads.create({ title: 'Paths' });
