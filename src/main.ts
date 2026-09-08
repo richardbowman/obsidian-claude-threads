@@ -1,5 +1,6 @@
 import { Plugin, WorkspaceLeaf, App, FileSystemAdapter, addIcon, Notice, Platform, normalizePath, TFile, Modal } from 'obsidian';
 import { createClaudeThreadsApiV1, type ClaudeThreadsApiService, type ClaudeThreadsApiV1, type CreateThreadInput, type OrchestratorSnapshot, type OrchestratorTarget } from './PublicApi';
+import { createConstrainedQueryRunner } from './ConstrainedRun';
 export { createClaudeThreadsApiV1 } from './PublicApi';
 export type { ClaudeThreadsApiV1 } from './PublicApi';
 // Desktop-only modules: type-only imports so their module-level code never runs on mobile.
@@ -24,6 +25,7 @@ import {
   type PluginSettings,
   DEFAULT_SETTINGS,
   effectiveExtraEnv,
+  parseExtraEnv,
   type Project,
   type ImageAttachment,
   type ScheduledItem,
@@ -1902,11 +1904,27 @@ export default class ClaudeThreadsPlugin extends Plugin {
         const project = input.projectId ? this.manager.getProject(input.projectId) : undefined;
         if (input.projectId && !project) throw new Error(`Project not found: ${input.projectId}`);
         const cwd = input.cwd ?? (project ? this.manager.getProjectCwd(project) : this.getEffectiveCwd());
-        const thread = this.manager.createThread(input.title?.trim() || 'New Thread', cwd, project?.id, input.agentHarness);
+        const thread = this.manager.createThread(input.title?.trim() || 'New Thread', cwd, project?.id, input.agentHarness, {
+          origin: input.origin, externalJobId: input.externalJobId, ephemeral: input.ephemeral, background: input.background,
+        });
         await this.saveSettings();
         return thread;
       },
       sendMessage: (id, prompt) => this.manager.sendMessage(id, prompt),
+      interruptThread: (id) => this.manager.interrupt(id),
+      getTraceMetadata: (id) => this.manager.getRawLogTraceMetadata(id),
+      readTraceChunk: (id, options) => this.manager.readRawLogTraceChunk(id, options),
+      getRegisteredSkillNames: async () => {
+        const { listInstalledSkills } = require('./skillManager') as typeof import('./skillManager');
+        return (await listInstalledSkills(this.settings.skillSources ?? [])).map(skill => skill.name);
+      },
+      getRedactionSecrets: () => [
+        ...(this.settings.secretEnvKeys ?? []).map((name) => this.app.secretStorage.getSecret(secretStorageKey(name))),
+        ...Object.entries(parseExtraEnv(effectiveExtraEnv(this.settings))).filter(([name]) => /(?:token|secret|key|password)/i.test(name)).map(([, value]) => value),
+      ].filter((value): value is string => Boolean(value)),
+      getPublicState: () => this.settings.publicApiState,
+      savePublicState: async (state) => { this.settings.publicApiState = state; await this.saveSettings(); },
+      runConstrainedQuery: createConstrainedQueryRunner(() => this.settings, undefined, () => this.manager.secretEnvResolver?.() ?? {}),
       openThread: (id) => this.openThreadInChatView(id),
       subscribe: (listener) => this.manager.subscribe(listener),
       listOrchestrators: () => this.listPublicOrchestrators(),

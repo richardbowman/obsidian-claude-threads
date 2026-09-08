@@ -19,6 +19,26 @@ export interface RawLogEnvelope {
   event: unknown;
 }
 
+export interface RawLogTraceMetadata {
+  sourceId: string;
+  revision: string;
+  contentHash: string;
+  byteLength: number;
+  updatedAt: number;
+}
+
+export interface RawLogTraceChunk {
+  metadata: RawLogTraceMetadata;
+  entries: RawLogEnvelope[];
+  nextByteOffset: number;
+  nextEventIndex: number;
+  eof: boolean;
+  bytesRead: number;
+  readCalls: number;
+  startBoundaryHash: string;
+  nextBoundaryHash: string;
+}
+
 /**
  * Append-only writer for per-thread raw JSONL conversation logs.
  *
@@ -36,6 +56,8 @@ export class RawLogWriter {
   private writeTails = new Map<string, Promise<void>>();
   /** Directories already created this session, to skip redundant mkdir calls. */
   private ensuredDirs = new Set<string>();
+  /** Last observed file identity/size, used to fence cursors after truncation. */
+  private traceFiles = new Map<string, { identity: string; size: number; epoch: number }>();
 
   constructor(
     private getVaultRoot: () => string,
@@ -127,6 +149,130 @@ export class RawLogWriter {
     const limit = opts?.limit ?? 100;
     const entries = limit > 0 ? filtered.slice(-limit) : filtered;
     return { path: abs, total: filtered.length, returned: entries.length, entries };
+  }
+
+  /**
+   * Return source metadata using stat only. `revision` is stable while a file is
+   * appended, but changes when it is replaced or observed to shrink. The
+   * content hash is a cheap version fingerprint, not a scan of the log bytes.
+   */
+  async getTraceMetadata(threadId: string): Promise<RawLogTraceMetadata | null> {
+    const abs = this.absolutePath(threadId);
+    if (!abs) return null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('crypto') as typeof import('crypto');
+    let stat: import('fs').Stats;
+    try {
+      stat = await fs.promises.stat(abs);
+    } catch {
+      return null;
+    }
+    if (!stat.isFile()) return null;
+    const handle = await fs.promises.open(abs, 'r');
+    const prefix = Buffer.alloc(Math.min(4096, stat.size));
+    try { await handle.read(prefix, 0, prefix.length, 0); } finally { await handle.close(); }
+    const firstLineEnd = prefix.indexOf(0x0a);
+    const immutablePrefix = prefix.subarray(0, firstLineEnd >= 0 ? firstLineEnd + 1 : prefix.length);
+    const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${crypto.createHash('sha256').update(immutablePrefix).digest('hex')}`;
+    const previous = this.traceFiles.get(abs);
+    const epoch = previous && (previous.identity !== identity || stat.size < previous.size)
+      ? previous.epoch + 1
+      : previous?.epoch ?? 0;
+    this.traceFiles.set(abs, { identity, size: stat.size, epoch });
+    const revision = crypto.createHash('sha256').update(`${identity}:${epoch}`).digest('hex');
+    const contentHash = crypto.createHash('sha256').update(`${revision}:${stat.size}:${stat.mtimeMs}`).digest('hex');
+    return { sourceId: threadId, revision, contentHash, byteLength: stat.size, updatedAt: stat.mtimeMs };
+  }
+
+  /**
+   * Stream a bounded number of JSONL entries from a known line boundary. At
+   * Reads in 64 KiB blocks. A semantic line is capped at 1 MiB; longer lines
+   * are skipped through their newline so a corrupt record cannot wedge paging.
+   */
+  async readTraceChunk(
+    threadId: string,
+    options: { byteOffset: number; eventIndex: number; limit: number },
+  ): Promise<RawLogTraceChunk | null> {
+    for (const [name, value] of Object.entries(options)) {
+      const valid = name === 'limit'
+        ? Number.isInteger(value) && value > 0
+        : Number.isInteger(value) && value >= 0;
+      if (!valid) throw new RangeError(`${name} must be a ${name === 'limit' ? 'positive' : 'non-negative'} integer.`);
+    }
+    const metadata = await this.getTraceMetadata(threadId);
+    const abs = this.absolutePath(threadId);
+    if (!metadata || !abs) return null;
+    if (options.byteOffset > metadata.byteLength) throw new RangeError('byteOffset is beyond the end of the trace source.');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs') as typeof import('fs');
+    const handle = await fs.promises.open(abs, 'r');
+    try {
+    // A small byte-boundary fingerprint makes a cursor self-verifying across
+    // process restarts without rereading the complete append-only source.
+    const boundaryHash = async (offset: number): Promise<string> => {
+      const length = Math.min(4096, offset); const bytes = Buffer.alloc(length);
+      if (length) await handle.read(bytes, 0, length, offset - length);
+      return crypto.createHash('sha256').update(bytes).digest('hex');
+    };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('crypto') as typeof import('crypto');
+    const startBoundaryHash = await boundaryHash(options.byteOffset);
+    const blockSize = 64 * 1024; const maxLineBytes = 1024 * 1024;
+    let bytesRead = 0; let readCalls = 0; let position = options.byteOffset; let pending = Buffer.alloc(0); let done = false;
+    const completeLines: Buffer[] = [];
+    while (!done && position < metadata.byteLength && completeLines.length < options.limit) {
+        const buffer = Buffer.alloc(Math.min(blockSize, metadata.byteLength - position));
+        const read = await handle.read(buffer, 0, buffer.length, position); readCalls += 1; if (!read.bytesRead) break;
+        bytesRead += read.bytesRead; position += read.bytesRead; pending = Buffer.concat([pending, buffer.subarray(0, read.bytesRead)]);
+        let newline: number;
+        while ((newline = pending.indexOf(0x0a)) >= 0) {
+          const line = pending.subarray(0, newline); pending = pending.subarray(newline + 1);
+          if (line.length <= maxLineBytes) completeLines.push(line);
+          if (completeLines.length >= options.limit) { done = true; break; }
+        }
+        if (pending.length > maxLineBytes) {
+          // Keep scanning without retaining an unbounded corrupt line.
+          pending = Buffer.alloc(maxLineBytes + 1, 0x78);
+        }
+    }
+    if (position >= metadata.byteLength && pending.length && pending.length <= maxLineBytes) completeLines.push(pending);
+    const currentMetadata = await this.getTraceMetadata(threadId);
+    if (!currentMetadata || currentMetadata.revision !== metadata.revision) {
+      throw new RangeError('The trace source was replaced or truncated while it was being read.');
+    }
+
+    const entries: RawLogEnvelope[] = [];
+    let consumed = bytesRead - pending.length;
+    let eventIndex = options.eventIndex;
+    for (const rawLine of completeLines) {
+      const line = rawLine.toString('utf8');
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line) as RawLogEnvelope);
+        eventIndex += 1;
+      } catch {
+        // Preserve the full-reader behavior: malformed complete lines are skipped.
+      }
+    }
+    if (position >= currentMetadata.byteLength) consumed = bytesRead;
+    const nextByteOffset = options.byteOffset + consumed;
+    const nextBoundaryHash = await boundaryHash(nextByteOffset);
+    return {
+      metadata: currentMetadata,
+      entries,
+      nextByteOffset,
+      nextEventIndex: eventIndex,
+      eof: nextByteOffset >= currentMetadata.byteLength,
+      bytesRead,
+      readCalls,
+      startBoundaryHash,
+      nextBoundaryHash,
+    };
+    } finally {
+      await handle.close();
+    }
   }
 
   /**

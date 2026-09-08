@@ -1,7 +1,7 @@
 import { type SessionCallbacks, type TaskTrackerEvent } from './ThreadSession';
 import { createHarnessSession } from './HarnessFactory';
 import { resolveCodexPermissions, type HarnessSession, type HarnessSessionOptions } from './HarnessSession';
-import { RawLogWriter } from './RawLogWriter';
+import { RawLogWriter, type RawLogTraceChunk, type RawLogTraceMetadata } from './RawLogWriter';
 import { AttachmentWriter } from './AttachmentWriter';
 import { collectPendingImageExternalizations } from './imageExternalization';
 import { effectiveExtraEnv } from './types';
@@ -294,6 +294,17 @@ export class ThreadManager {
     return this.rawLogWriter.read(threadId, opts);
   }
 
+  getRawLogTraceMetadata(threadId: string): Promise<RawLogTraceMetadata | null> {
+    return this.rawLogWriter.getTraceMetadata(threadId);
+  }
+
+  readRawLogTraceChunk(
+    threadId: string,
+    options: { byteOffset: number; eventIndex: number; limit: number },
+  ): Promise<RawLogTraceChunk | null> {
+    return this.rawLogWriter.readTraceChunk(threadId, options);
+  }
+
   /**
    * Externalize a finalized message's images to vault attachment files, setting
    * `path` on each ref once written (base64/data stays in the live object for
@@ -491,7 +502,7 @@ export class ThreadManager {
     this.emit(thread.id, { type: 'agent_runs_changed', agentRuns: thread.agentRuns });
   }
 
-  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: 'claude' | 'codex'): Thread {
+  createThread(title: string, cwd?: string, projectId?: string, agentHarness?: 'claude' | 'codex', metadata?: Pick<Thread, 'origin' | 'externalJobId' | 'ephemeral' | 'background'>): Thread {
     const thread: Thread = {
       id: crypto.randomUUID(),
       title: title || `Thread ${this.threads.size + 1}`,
@@ -502,6 +513,7 @@ export class ThreadManager {
       projectId,
       status: 'waiting',
       agentHarness: agentHarness ?? this.settings.agentHarness,
+      ...metadata,
     };
     this.threads.set(thread.id, thread);
     this.emit(thread.id, { type: 'thread_created' });

@@ -20,6 +20,10 @@ import { ACTIVE_AGENT_STATUSES } from './agentRuns/agentTreeModel';
 
 export const KANBAN_VIEW_TYPE = 'claude-threads:kanban';
 
+export function isKanbanThread(thread: Pick<Thread, 'background'>): boolean {
+  return !thread.background;
+}
+
 type RowState = 'running' | 'idle' | 'error' | 'empty' | 'waiting';
 
 type ColDef = { label: string; threads: Thread[]; state: RowState; accentClass?: string; badge?: number };
@@ -445,7 +449,7 @@ export class KanbanView extends ItemView {
     this.cardPlacements.clear();
 
     const q = this.searchQuery;
-    const allThreads = this.manager.getThreads();
+    const allThreads = this.manager.getThreads().filter(isKanbanThread);
     const threads = q
       ? allThreads.filter(t =>
           t.title.toLowerCase().includes(q) ||

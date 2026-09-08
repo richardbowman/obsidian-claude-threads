@@ -1,0 +1,35 @@
+/** Stable type-only contract for Agent Threads peer plugins. */
+export type AgentHarness = 'claude' | 'codex';
+export type ThreadStatus = 'waiting' | 'active' | 'error' | 'archived' | 'reconnecting';
+export type PublicErrorCode = 'PLUGIN_UNAVAILABLE' | 'THREAD_NOT_FOUND' | 'RUN_NOT_FOUND' | 'RUN_FAILED' | 'RUN_INTERRUPTED' | 'THREAD_BUSY' | 'IDEMPOTENCY_CONFLICT' | 'TRACE_NOT_FOUND' | 'CURSOR_INVALID' | 'CONSTRAINT_UNSUPPORTED' | 'ORCHESTRATOR_NOT_FOUND' | 'INVALID_ARGUMENT';
+export interface PublicError { readonly code: PublicErrorCode; readonly message: string }
+export interface Disposable { dispose(): void }
+export interface CorrelationInput { readonly ownerPluginId?: string; readonly idempotencyKey?: string }
+export interface CreateThreadInput extends CorrelationInput { readonly title?: string; readonly cwd?: string; readonly projectId?: string; readonly agentHarness?: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean }
+export interface SendInput extends CorrelationInput { readonly prompt: string }
+export interface MessageSnapshot { readonly id: string; readonly role: 'user' | 'assistant' | 'compact' | 'notice'; readonly content: string; readonly timestamp: number }
+export interface ThreadSummary { readonly id: string; readonly title: string; readonly status: ThreadStatus; readonly reviewed: boolean; readonly cwd?: string; readonly projectId?: string; readonly agentHarness: AgentHarness; readonly origin?: string; readonly externalJobId?: string; readonly ephemeral?: boolean; readonly background?: boolean; readonly createdAt: number; readonly updatedAt: number; readonly isRunning: boolean; readonly messageCount: number }
+export interface ThreadSnapshot extends ThreadSummary { readonly messages: readonly MessageSnapshot[] }
+export interface PublicUsage { readonly inputTokens: number; readonly outputTokens: number; readonly costUsd: number; readonly durationMs?: number; readonly turns?: number }
+export type RunResult = { readonly status: 'completed'; readonly runId: string; readonly threadId: string; readonly finalMessage?: MessageSnapshot; readonly usage?: PublicUsage } | { readonly status: 'failed'; readonly runId: string; readonly threadId: string; readonly error: PublicError } | { readonly status: 'timed_out'; readonly runId: string; readonly threadId: string };
+export type PublicThreadEvent = { readonly kind: 'run.started'; readonly threadId: string; readonly runId: string; readonly at: number } | { readonly kind: 'message.completed'; readonly threadId: string; readonly runId?: string; readonly message: MessageSnapshot; readonly at: number } | { readonly kind: 'run.completed'; readonly threadId: string; readonly runId: string; readonly finalMessage?: MessageSnapshot; readonly at: number } | { readonly kind: 'run.failed'; readonly threadId: string; readonly runId: string; readonly error: PublicError; readonly at: number } | { readonly kind: 'thread.removed'; readonly threadId: string; readonly at: number };
+export interface TraceSource { readonly sourceId: string; readonly threadId: string; readonly projectId?: string; readonly harness: AgentHarness; readonly revision: string; readonly contentHash: string; readonly byteLength: number; readonly updatedAt: number }
+export interface TraceSourcePage { readonly sources: readonly TraceSource[]; readonly nextCursor?: string; readonly eof: boolean }
+export interface SkillRunOutcome { readonly invokedSkill: string; readonly runOutcome: 'success' | 'failure'; readonly invocationIndex: number }
+export interface TraceEvent { readonly index: number; readonly timestamp: string; readonly type: string; readonly invokedSkill?: string; readonly skillLoadOutcome?: 'loaded'; readonly skillRunOutcomes?: readonly SkillRunOutcome[]; readonly data: unknown }
+export interface TraceChunk { readonly sourceId: string; readonly revision: string; readonly contentHash: string; readonly cursor?: string; readonly nextCursor: string; readonly eof: boolean; readonly events: readonly TraceEvent[] }
+export type PublicTraceEvent = { readonly kind: 'trace.updated' | 'trace.removed'; readonly sourceId: string; readonly revision: string; readonly at: number };
+export interface ConstrainedRunInput { readonly ownerPluginId: string; readonly idempotencyKey: string; readonly harness: 'claude'; readonly model: string; readonly systemInstructions: string; readonly prompt: string; readonly maxTurns: 1; readonly maxBudgetUsd: number; readonly timeoutMs: number }
+export type ConstrainedRunResult = { readonly status: 'running'; readonly runId: string } | { readonly status: 'completed'; readonly runId: string; readonly output: string; readonly model: string; readonly usage: PublicUsage } | { readonly status: 'failed' | 'cancelled'; readonly runId: string; readonly error: PublicError };
+export interface OrchestratorSnapshot { readonly id: string; readonly kind: 'portfolio' | 'project'; readonly threadId: string; readonly title: string; readonly projectId?: string }
+export interface AgentToolDefinition { readonly type: 'function'; readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> }
+export interface AgentToolBundle { readonly tools: readonly AgentToolDefinition[]; execute(name: string, args: Record<string, unknown>): Promise<string> }
+export interface AgentThreadsApiV1 {
+  readonly apiVersion: 1; readonly generation: string; readonly capabilities: readonly string[];
+  readonly threads: { list(query?: { readonly projectId?: string | null; readonly status?: ThreadStatus; readonly limit?: number }): Promise<readonly ThreadSummary[]>; get(threadId: string): Promise<ThreadSnapshot | null>; create(input: CreateThreadInput): Promise<{ readonly threadId: string }>; send(threadId: string, input: SendInput): Promise<{ readonly runId: string }>; wait(runId: string, options?: { readonly timeoutMs?: number }): Promise<RunResult>; cancel(runId: string): Promise<Exclude<RunResult, { status: 'timed_out' }>>; open(threadId: string): Promise<void>; subscribe(listener: (event: PublicThreadEvent) => void): Disposable };
+  readonly traces: { listSources(options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceSourcePage>; readChunk(sourceId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<TraceChunk>; subscribe(listener: (event: PublicTraceEvent) => void): Disposable };
+  readonly constrainedRuns: { create(input: ConstrainedRunInput): Promise<{ readonly runId: string }>; get(runId: string): Promise<ConstrainedRunResult>; wait(runId: string, options?: { readonly timeoutMs?: number }): Promise<ConstrainedRunResult>; cancel(runId: string): Promise<ConstrainedRunResult> };
+  readonly orchestrators: { list(): Promise<readonly OrchestratorSnapshot[]>; dispatch(target: { readonly id: string }, input: SendInput): Promise<{ readonly runId: string }> };
+  readonly agentTools: { createBundle(profile: 'voice-orchestration'): AgentToolBundle };
+}
+export type ClaudeThreadsApiV1 = AgentThreadsApiV1;

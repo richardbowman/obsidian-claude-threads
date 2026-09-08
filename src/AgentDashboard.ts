@@ -20,6 +20,10 @@ import { promptConfirm } from './confirmModal';
 
 export const AGENT_VIEW_TYPE = 'claude-threads:agents';
 
+export function isDashboardThread(thread: Pick<Thread, 'background'>): boolean {
+  return !thread.background;
+}
+
 type RowState = 'running' | 'waiting' | 'idle' | 'error' | 'empty';
 
 export class AgentDashboard extends ItemView {
@@ -448,7 +452,7 @@ export class AgentDashboard extends ItemView {
     this.rowEls.clear();
 
     const q = this.searchQuery;
-    const allThreads = this.manager.getThreads();
+    const allThreads = this.manager.getThreads().filter(isDashboardThread);
     const threads = q
       ? allThreads.filter(t =>
           t.title.toLowerCase().includes(q) ||
@@ -860,7 +864,7 @@ export class AgentDashboard extends ItemView {
    *  Can be called repeatedly to triage through the queue. */
   public jumpToLatestUnreviewed(): void {
     const candidate = this.manager.getThreads()
-      .filter(t => !this.manager.isRunning(t.id) && !t.lastError && t.messages.length > 0 && !t.reviewed)
+      .filter(t => isDashboardThread(t) && !this.manager.isRunning(t.id) && !t.lastError && t.messages.length > 0 && !t.reviewed)
       .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (!candidate) {

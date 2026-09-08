@@ -274,6 +274,10 @@ export interface Thread {
   rateLimitRetryCount?: number;
   model?: string;
   projectId?: string;
+  /** Stable producer identity for peer-plugin jobs; absent for user-authored threads. */
+  origin?: string;
+  externalJobId?: string;
+  background?: boolean;
   reviewed?: boolean;
   /** Paths of files written or edited during this thread's lifetime. */
   editedFiles?: string[];
@@ -886,6 +890,8 @@ export interface PluginSettings {
   enableInlineVisualizations?: boolean;
   /** Registered local skill collections browsable from the Skills Manager. */
   skillSources: SkillSource[];
+  /** Durable peer-API correlations and bounded run results. Internal format; consumers use api.v1. */
+  publicApiState?: import('./PublicApi').PublicApiPersistedState;
   /** Width in px of the Skills Manager's left list panel, set by dragging the divider. */
   skillsListWidth: number;
 }

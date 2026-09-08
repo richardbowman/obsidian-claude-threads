@@ -861,6 +861,10 @@ Thread state in the plugin's `data.json` is canonical during normal startup. Whe
 
 ## Building from source
 
+### Peer plugins
+
+Geode/Obsidian peer plugins can discover the generation-scoped Agent Threads API at `app.plugins.plugins['claude-threads']?.api?.v1`. It provides immutable thread operations, sanitized cursor-based trace projection, and fail-closed constrained Claude runs for input-only evaluation. See [Peer Plugin API v1](docs/public-api.md) and the checked-in [type contract](api/public-api-v1.d.ts).
+
 ```bash
 git clone https://github.com/rbcodelabs/obsidian-claude-threads
 cd obsidian-claude-threads
