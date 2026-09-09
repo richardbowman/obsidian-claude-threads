@@ -116,15 +116,21 @@
   height: 14px;
 }
 
-/* Rename input inside the title bar */
+/* Thread rename dialog */
 .ct-title-rename-input {
-  flex: 1;
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
-  padding: 2px 4px;
+  min-height: 44px;
+  padding: 8px;
   font-size: var(--font-ui-small);
   background: var(--background-modifier-form-field);
   border: 1px solid var(--interactive-accent);
   border-radius: 3px;
+}
+
+.ct-rename-thread-modal button {
+  min-height: 44px;
 }
 
 .ct-root {
