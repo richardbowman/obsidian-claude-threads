@@ -11,7 +11,7 @@ export class McpRegistrationModal extends Modal {
   onOpen(): void {
     this.contentEl.addClass('ct-mcp-registration');
     this.contentEl.createEl('h2', { text: 'Register MCP server?' });
-    this.contentEl.createEl('p', { text: 'This adds the server globally to Claude Threads settings for all projects and threads.' });
+    this.contentEl.createEl('p', { text: 'This adds the server globally to Agent Threads settings for all projects and threads.' });
     this.contentEl.createEl('p', { text: this.entry.type === 'stdio'
       ? 'Newly initialized sessions may run this command with your account permissions. Registration itself does not run it.'
       : 'Newly initialized sessions may connect to this endpoint and send configured headers. Registration itself does not connect.' });

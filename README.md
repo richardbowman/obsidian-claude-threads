@@ -473,6 +473,12 @@ A server whose `${VAR_NAME}` placeholders cannot be resolved is **skipped rather
   <img src="docs/screenshot-mcp-edit-server.png" width="800" alt="Add/edit MCP server form: a type toggle between Command (stdio) and HTTP or SSE, with Name, Command, Arguments, and Environment variables fields, the env field showing a ${NOTES_API_TOKEN} placeholder" />
 </p>
 
+Agents can also call `mcp_register_server` to propose a server. A host dialog shows the unresolved configuration and asks you to **Register server** or **Cancel**, including when normal tool permissions are bypassed. Approval saves globally for newly initialized Claude and Codex sessions; it does not launch a command, contact an endpoint, or change the calling session's tools. Scheduled threads return an unavailable result instead of waiting for a dialog.
+
+The tool accepts a flat `name`, `type` (`stdio`, `http`, or `sse`), plus `command`/`args`/`env` for stdio or `url`/`headers` for remote servers. An identical retry is unchanged; a different configuration under an existing name is rejected. Built-in and prototype-related names are reserved. Remote URLs must use HTTP(S) and cannot contain embedded credentials.
+
+Use `${NAME}` for every credential and `request_secret` to save its value securely. Common credential fields are validated, but arbitrary argument strings cannot be reliably classified: all literal values must be nonsecret. Registration returns status and required variable names, never resolved credentials. Missing variables are checked when a future session initializes. See [agent registration details](docs/mcp-registration.md).
+
 ### Remote access (mobile)
 
 Agent Threads can mirror your desktop sessions to Obsidian Mobile in real time. Your phone becomes a thin client: you can read the conversation as it streams, send messages, approve permission requests, answer AskUserQuestion prompts, and switch between threads — all over a secure WebSocket relay. The desktop does all the actual Claude work; mobile just shows the state.

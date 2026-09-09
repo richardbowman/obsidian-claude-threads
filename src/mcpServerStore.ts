@@ -70,6 +70,7 @@ export interface McpRegistrationResult {
   success: boolean;
   status: 'registered' | 'unchanged' | 'conflict' | 'invalid' | 'cancelled' | 'unavailable' | 'failed';
   message: string;
+  requiredVariables?: string[];
 }
 
 /** One instance per plugin, shared across all per-thread MCP servers. */
@@ -88,6 +89,12 @@ export function createMcpRegistration(host: {
     const entry = parsed.data;
     if (!interactive || !host.confirm) return Promise.resolve(result('unavailable', 'Interactive host confirmation is unavailable. Register this server from an interactive thread.'));
     const config = toStoredServer(entry);
+    const variables = new Set<string>();
+    collectPlaceholders(config, variables);
+    const successResult = (status: 'registered' | 'unchanged', message: string): McpRegistrationResult => ({
+      ...result(status, message + (variables.size ? ' Store credential variables with request_secret; missing variables cause the server to be skipped.' : '')),
+      requiredVariables: [...variables].sort(),
+    });
     // Sorted record keys make semantic retries independent of object insertion order.
     const stable = (value: unknown): string => JSON.stringify(value, (_key, v) =>
       v && typeof v === 'object' && !Array.isArray(v)
@@ -96,7 +103,7 @@ export function createMcpRegistration(host: {
       const existing = host.getSettings().mcpServers;
       if (!Object.prototype.hasOwnProperty.call(existing ?? {}, entry.name)) return;
       return stable(normalizeStoredServer(existing[entry.name])) === stable(config)
-        ? result('unchanged', 'An identical global MCP configuration already exists. Newly initialized sessions use it.')
+        ? successResult('unchanged', 'An identical global MCP configuration already exists. Newly initialized sessions use it.')
         : result('conflict', 'That MCP server name already exists with a different configuration. No changes were made.');
     };
     const transaction = async (): Promise<McpRegistrationResult> => {
@@ -118,7 +125,7 @@ export function createMcpRegistration(host: {
         if (current?.[entry.name] === config) delete current[entry.name];
         return result('failed', 'MCP registration could not be saved. Retry after checking settings storage.');
       }
-      return result('registered', 'Saved globally. Newly initialized sessions can start or connect to this server; the current session is unchanged.');
+      return successResult('registered', 'Saved globally. Newly initialized sessions can start or connect to this server; the current session is unchanged.');
     };
     const pending = queue.then(transaction);
     queue = pending.catch(() => undefined);

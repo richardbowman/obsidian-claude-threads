@@ -457,8 +457,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = createClaudeThreadsMcpServers(this.app, {
-          onRegisterMcpServer: input => registerMcpServer(input,
-            mcpRegistrationAvailable && !this.manager.getThread(threadId)?.scheduledItemId),
+          onRegisterMcpServer: input => {
+            const caller = this.manager.getThread(threadId);
+            return registerMcpServer(input, mcpRegistrationAvailable && !!caller && !caller.scheduledItemId);
+          },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;
