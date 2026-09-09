@@ -8441,3 +8441,17 @@ button.ct-agent-crumb:focus-visible {
   .ct-agent-row-button { padding-left: calc(6px + min(var(--ct-agent-level, 0), 3) * 8px); }
   .ct-agent-crumb { max-width: 120px; }
 }
+/* Registration details wrap even long URLs/arguments on narrow screens. */
+.ct-mcp-registration-config {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.ct-mcp-registration-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ct-mcp-registration-buttons button { min-height: 44px; }

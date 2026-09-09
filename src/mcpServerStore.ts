@@ -25,10 +25,13 @@ import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import type { PluginSettings, StoredMcpServer } from './types';
 import { z } from 'zod';
 
+const isReservedMcpName = (name: string): boolean =>
+  ['claude_threads', 'obsidian', '__proto__', 'constructor', 'prototype'].includes(name.toLowerCase());
+
 /** Shared schema, including direct harness calls which do not parse SDK schemas. */
 export const mcpRegistrationSchema = z.object({
   name: z.string().trim().regex(/^[A-Za-z0-9_-]+$/).refine(name =>
-    !['claude_threads', 'obsidian', '__proto__', 'constructor', 'prototype'].includes(name)),
+    !isReservedMcpName(name)),
   type: z.enum(['stdio', 'http', 'sse']),
   command: z.string().trim().min(1).optional(),
   args: z.array(z.string()).optional(),
@@ -83,6 +86,7 @@ export function createMcpRegistration(host: {
     });
     if (!parsed.success) return Promise.resolve(result('invalid', 'Invalid MCP configuration. Check the server name, transport and fields. Credentials must use ${NAME} placeholders; use request_secret to store them.'));
     const entry = parsed.data;
+    if (!interactive || !host.confirm) return Promise.resolve(result('unavailable', 'Interactive host confirmation is unavailable. Register this server from an interactive thread.'));
     const config = toStoredServer(entry);
     // Sorted record keys make semantic retries independent of object insertion order.
     const stable = (value: unknown): string => JSON.stringify(value, (_key, v) =>
@@ -241,6 +245,7 @@ export function saveMcpServer(
   if (!NAME_PATTERN.test(name)) {
     return { ok: false, error: 'Name may only contain letters, numbers, hyphens, and underscores.' };
   }
+  if (isReservedMcpName(name)) return { ok: false, error: 'That MCP server name is reserved.' };
   if (entry.type !== 'stdio' && entry.type !== 'http' && entry.type !== 'sse') {
     return { ok: false, error: `Unsupported server type: ${String(entry.type)}` };
   }

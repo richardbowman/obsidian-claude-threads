@@ -35,10 +35,11 @@ it('makes identical retries idempotent and never overwrites a collision', async 
   expect(f.save).toHaveBeenCalledOnce();
 });
 
-it.each(['claude_threads', 'obsidian', '__proto__', 'constructor', 'prototype'])('rejects reserved name %s', async name => {
+it.each(['claude_threads', 'CLAUDE_THREADS', 'obsidian', '__proto__', 'constructor', 'prototype'])('rejects reserved name %s', async name => {
   const f = fixture();
   expect(await f.register({ ...proposal, name })).toMatchObject({ status: 'invalid' });
   expect(f.confirm).not.toHaveBeenCalled();
+  expect(registration.saveMcpServer(f.settings, { name, type: 'stdio', command: 'x' })).toMatchObject({ ok: false });
 });
 
 it.each([null, { ...proposal, args: [1] }, { ...proposal, env: { API_TOKEN: 'raw-secret' } }, { name: 'x', type: 'http', url: 'file:///tmp/x' }, { name: 'x', type: 'sse', url: 'https://user:password@example.com' }, { name: 'x', type: 'http', url: 'https://example.com', headers: { Authorization: 'Bearer raw-secret' } }])('rejects malformed or credential-bearing input without echoing it', async input => {
@@ -85,6 +86,14 @@ it('preserves a newer settings edit when persistence fails', async () => {
   f.save.mockImplementation(async () => { f.settings.mcpServers.example = { type: 'stdio', command: 'edited' }; throw new Error('disk'); });
   await f.register(proposal);
   expect(f.settings.mcpServers.example).toEqual({ type: 'stdio', command: 'edited' });
+});
+
+it.each(['http', 'sse'])('registers %s and protects confirmed input from caller mutation', async type => {
+  const f = fixture();
+  const input = { name: 'remote', type, url: 'https://example.com/mcp', headers: { Authorization: 'Bearer ${TOKEN}' } };
+  f.confirm.mockImplementation(async () => { input.headers.Authorization = 'changed'; return true; });
+  expect(await f.register(input)).toMatchObject({ status: 'registered' });
+  expect(f.settings.mcpServers.remote).toMatchObject({ headers: { Authorization: 'Bearer ${TOKEN}' } });
 });
 
 it('offers host-confirmed registration backed by the existing MCP store', () => {
