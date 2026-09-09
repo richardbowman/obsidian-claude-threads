@@ -76,6 +76,86 @@ function makeHarness(
 }
 
 describe('ContextPanelController', () => {
+  function durableHarness() {
+    const h = makeHarness('stale-legacy-marker');
+    const destination = makeLeaf('host-owned');
+    const acquire = vi.fn(() => ({ leaf: destination, reused: true }));
+    Object.assign(h.workspace, { getOrCreateCompanionLeaf: acquire });
+    return { ...h, destination, acquire };
+  }
+
+  it('recovers the host destination after module reload and chat replacement without touching legacy state', async () => {
+    const h = durableHarness();
+    await h.controller.openFile({ path: 'First.md' } as TFile);
+    await h.controller.dispose();
+    h.replaceChat(makeLeaf('restored-chat'));
+    const restored = h.createController(createCompanionOwnershipStore());
+    expect(await restored.setViewState({ type: 'webviewer', state: { url: 'https://example.com' } })).toBe(true);
+    expect(h.acquire).toHaveBeenCalledTimes(2);
+    expect(h.acquire.mock.calls[0]).toEqual(['claude-threads:conversation-context', h.chat, 0.3]);
+    expect(h.workspace.splitActiveLeaf).not.toHaveBeenCalled();
+    expect(h.destination.detach).not.toHaveBeenCalled();
+    expect(h.getMarker()).toBe('stale-legacy-marker');
+  });
+
+  it('uses the host replacement destination and reuse result when the destination tab was closed', async () => {
+    const h = durableHarness();
+    h.acquire.mockReturnValueOnce({ leaf: h.destination, reused: false });
+    expect(await h.controller.setViewState({ type: 'markdown', state: { file: 'New.md' } })).toBe(false);
+    expect(h.acquire).toHaveBeenCalledOnce();
+    expect(h.destination.setViewState).toHaveBeenCalledOnce();
+  });
+
+  it('routes unresolved links and direct leaf access through the host', async () => {
+    const h = durableHarness();
+    expect(h.controller.getLeaf()).toBe(h.destination);
+    await h.controller.openLinkText('Missing#Heading');
+    expect(h.destination.setViewState).toHaveBeenCalledWith({ type: 'markdown', active: true, state: { file: 'Missing' }, eState: { subpath: '#Heading' } });
+    expect(h.workspace.splitActiveLeaf).not.toHaveBeenCalled();
+  });
+
+  it('waits for restored layout before acquiring the host destination', async () => {
+    const h = durableHarness();
+    let ready!: () => void;
+    Object.assign(h.workspace, { onLayoutReady: (callback: () => void) => { ready = callback; } });
+    const opening = h.controller.openFile({ path: 'Later.md' } as TFile);
+    expect(h.acquire).not.toHaveBeenCalled();
+    ready();
+    await opening;
+    expect(h.acquire).toHaveBeenCalledOnce();
+  });
+
+  it('prevents pending layout navigation from acquiring a pane after disposal', async () => {
+    const h = durableHarness();
+    let ready!: () => void;
+    Object.assign(h.workspace, { onLayoutReady: (callback: () => void) => { ready = callback; } });
+    const opening = h.controller.openFile({ path: 'Later.md' } as TFile);
+    await h.controller.dispose();
+    ready();
+    await expect(opening).rejects.toThrow('disposed');
+    expect(h.acquire).not.toHaveBeenCalled();
+    expect(() => h.controller.getLeaf()).toThrow('disposed');
+  });
+
+  it('does not reveal a destination if disposed while its view is opening', async () => {
+    const h = durableHarness();
+    let opened!: () => void;
+    h.destination.setViewState.mockImplementation(() => new Promise<void>((resolve) => { opened = resolve; }));
+    const opening = h.controller.setViewState({ type: 'webviewer', state: {} });
+    await vi.waitFor(() => expect(h.destination.setViewState).toHaveBeenCalled());
+    await h.controller.dispose();
+    opened();
+    await expect(opening).rejects.toThrow('disposed');
+    expect(h.workspace.revealLeaf).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes native view failures from controller cancellation', async () => {
+    const h = durableHarness();
+    h.destination.setViewState.mockRejectedValue(new Error('view failed'));
+    await expect(h.controller.setViewState({ type: 'webviewer', state: {} })).rejects.toMatchObject({ name: 'ContextPanelViewError' });
+    expect(h.workspace.revealLeaf).not.toHaveBeenCalled();
+  });
+
   it('creates one right-adjacent companion and reuses it for later files', async () => {
     const { controller, workspace, chat, firstCompanion } = makeHarness();
     const firstFile = { path: 'Notes/first.md' } as TFile;

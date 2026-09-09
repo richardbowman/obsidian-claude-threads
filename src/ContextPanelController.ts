@@ -3,13 +3,23 @@ import { parseLinktext, type App, type OpenViewState, type TFile, type ViewState
 interface OwnedCompanion { workspace: object; chatLeaf: WorkspaceLeaf; companionLeaf: WorkspaceLeaf }
 interface RatioWorkspace {
   splitActiveLeafWithRatio?(direction: 'vertical' | 'horizontal', ratio: number): WorkspaceLeaf;
+  getOrCreateCompanionLeaf?(ownerKey: string, anchorLeaf: WorkspaceLeaf, leadingRatio: number): { leaf: WorkspaceLeaf; reused: boolean };
 }
 export type CompanionOwnershipStore = Map<string, OwnedCompanion>;
 export function createCompanionOwnershipStore(): CompanionOwnershipStore { return new Map(); }
 const defaultOwnershipStore = createCompanionOwnershipStore();
 function createMarker(): string { return `ct-companion-${crypto.randomUUID()}`; }
 
+/** Allows URL callers to preserve external fallback only for native view failures. */
+export class ContextPanelViewError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'ContextPanelViewError';
+  }
+}
+
 export class ContextPanelController {
+  private disposed = false;
   private companionLeaf: WorkspaceLeaf | null = null;
   private activeMarker: string | undefined;
   private markerPersisted = false;
@@ -24,10 +34,19 @@ export class ContextPanelController {
   ) {}
 
   getLeaf(): WorkspaceLeaf {
+    return this.acquireLeaf().leaf;
+  }
+
+  private acquireLeaf(): { leaf: WorkspaceLeaf; reused: boolean } {
+    this.assertActive();
     const chatLeaf = this.getChatLeaf();
     if (!chatLeaf) throw new Error('Agent Threads chat must be open before contextual content can be shown.');
+    const host = this.app.workspace as typeof this.app.workspace & RatioWorkspace;
+    if (typeof host.getOrCreateCompanionLeaf === 'function') {
+      return host.getOrCreateCompanionLeaf('claude-threads:conversation-context', chatLeaf, 0.3);
+    }
     const restored = this.findOwnedCompanion(chatLeaf);
-    if (restored) { this.companionLeaf = restored; return restored; }
+    if (restored) { this.companionLeaf = restored; return { leaf: restored, reused: true }; }
 
     const workspace = this.app.workspace;
     workspace.revealLeaf(chatLeaf);
@@ -41,14 +60,17 @@ export class ContextPanelController {
     this.markerPersisted = false;
     this.companionLeaf = companionLeaf;
     void this.ensureMarkerPersisted();
-    return companionLeaf;
+    return { leaf: companionLeaf, reused: false };
   }
 
   async openFile(file: TFile, openState?: OpenViewState): Promise<void> {
+    await this.waitForLayout();
     const leaf = this.getLeaf();
     await this.ensureMarkerPersisted();
+    this.assertActive();
     if (openState) await leaf.openFile(file, openState);
     else await leaf.openFile(file);
+    this.assertActive();
     this.app.workspace.revealLeaf(leaf);
   }
 
@@ -66,22 +88,37 @@ export class ContextPanelController {
     // Never delegate unresolved conversation-first links to workspace-level
     // routing: it may target the active chat leaf. Keep the native markdown
     // attempt confined to the owned companion instead.
+    await this.waitForLayout();
     const leaf = this.getLeaf();
     await this.ensureMarkerPersisted();
+    this.assertActive();
     await leaf.setViewState({ type: 'markdown', active: true, state: { file: linkPath }, ...openState });
+    this.assertActive();
     this.app.workspace.revealLeaf(leaf);
   }
 
   async setViewState(viewState: ViewState): Promise<boolean> {
-    const reused = this.hasReusableLeaf();
-    const leaf = this.getLeaf();
+    await this.waitForLayout();
+    const { leaf, reused } = this.acquireLeaf();
     await this.ensureMarkerPersisted();
-    await leaf.setViewState(viewState);
+    this.assertActive();
+    try {
+      await leaf.setViewState(viewState);
+    } catch (error) {
+      this.assertActive();
+      throw new ContextPanelViewError(error);
+    }
+    this.assertActive();
     this.app.workspace.revealLeaf(leaf);
     return reused;
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    if (typeof (this.app.workspace as RatioWorkspace).getOrCreateCompanionLeaf === 'function') {
+      this.companionLeaf = null;
+      return;
+    }
     const marker = this.activeMarker ?? this.getPersistedMarker();
     const owned = typeof marker === 'string' ? this.ownershipStore.get(marker) : undefined;
     if (owned?.workspace === this.app.workspace && this.isAttached(owned.companionLeaf)) owned.companionLeaf.detach();
@@ -94,9 +131,17 @@ export class ContextPanelController {
     });
   }
 
-  private hasReusableLeaf(): boolean {
-    const chatLeaf = this.getChatLeaf();
-    return Boolean(chatLeaf && this.findOwnedCompanion(chatLeaf));
+  private assertActive(): void {
+    if (this.disposed) throw new Error('Agent Threads context controller is disposed.');
+  }
+
+  private async waitForLayout(): Promise<void> {
+    this.assertActive();
+    // The host restores durable ownership before it signals layout readiness.
+    if (typeof this.app.workspace.onLayoutReady === 'function') {
+      await new Promise<void>((resolve) => this.app.workspace.onLayoutReady(resolve));
+    }
+    this.assertActive();
   }
 
   private findOwnedCompanion(chatLeaf: WorkspaceLeaf): WorkspaceLeaf | null {
