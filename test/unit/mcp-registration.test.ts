@@ -21,7 +21,7 @@ it('confirms before writing, awaits durable save, and resolves only in future se
   await vi.waitFor(() => expect(f.save).toHaveBeenCalledOnce());
   expect(settled).toBe(false);
   finish();
-  expect(await pending).toMatchObject({ success: true, status: 'registered' });
+  expect(await pending).toMatchObject({ success: true, status: 'registered', requiredVariables: ['EXAMPLE_TOKEN'] });
   expect(f.settings.mcpServers.example).toMatchObject({ env: { API_TOKEN: '${EXAMPLE_TOKEN}' } });
   expect(registration.resolveMcpServers(f.settings.mcpServers, { EXAMPLE_TOKEN: 'resolved-secret' }).servers.example).toMatchObject({ env: { API_TOKEN: 'resolved-secret' } });
 });
@@ -59,6 +59,17 @@ it('cancels without changes and rejects unavailable or scheduled confirmation', 
   expect(await unavailable(proposal)).toMatchObject({ status: 'unavailable' });
   expect(f.save).not.toHaveBeenCalled();
   expect(f.settings.mcpServers).toEqual({});
+});
+
+it('returns unavailable immediately even while another call waits for confirmation', async () => {
+  const f = fixture();
+  let dismiss!: (value: boolean) => void;
+  f.confirm.mockImplementation(() => new Promise<boolean>(resolve => { dismiss = resolve; }));
+  const pending = f.register(proposal);
+  await vi.waitFor(() => expect(f.confirm).toHaveBeenCalledOnce());
+  expect(await f.register(proposal, false)).toMatchObject({ status: 'unavailable' });
+  dismiss(false);
+  expect(await pending).toMatchObject({ status: 'cancelled' });
 });
 
 it('serializes concurrent calls and rechecks collisions after confirmation', async () => {

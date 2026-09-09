@@ -461,7 +461,7 @@ Settings → **MCP** lists, adds, edits, and removes the external MCP servers re
   <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP tab: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
 </p>
 
-**These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for new threads only — sessions already running keep whatever MCP servers they started with.
+**These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for newly initialized or reinitialized sessions — existing session adapters keep whatever MCP servers they started with.
 
 > Earlier versions kept this list in a `mcpServers` block inside `~/.claude/settings.json`. That was a mistake: Claude Code owns that file, its schema has no top-level `mcpServers` property, and neither the CLI nor the SDK ever read what the plugin wrote there. The plugin no longer reads or writes that file at all. If you have a leftover `mcpServers` block in your `settings.json`, it is inert and safe to delete — re-add those servers here.
 

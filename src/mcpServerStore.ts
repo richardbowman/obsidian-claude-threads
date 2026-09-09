@@ -17,8 +17,9 @@
  *   live session, and REFUSES to emit a server whose placeholders don't
  *   resolve. See the note on that function.
  *
- * Everything here is pure: no fs, no process spawning. Callers own persistence
- * (`saveSettings()`) and reporting.
+ * No fs or process spawning lives here. Callers own persistence
+ * (`saveSettings()`) and reporting; agent registration coordinates injected
+ * host confirmation and persistence callbacks.
  */
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';

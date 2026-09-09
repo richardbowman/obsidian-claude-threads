@@ -1757,6 +1757,7 @@ test.describe('Agent Threads UI', () => {
       expect(await content.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
       const button = page.getByRole('button', { name: 'Register server', exact: true });
       expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await page.screenshot({ path: test.info().outputPath(`mcp-registration-${viewport.width}.png`) });
       await button.click();
       expect(await page.evaluate(() => (window as any).__mcpRegistrationResult)).toBe(true);
     });
