@@ -2,6 +2,7 @@ import { z } from 'zod';
 // Import from the browser entry point to avoid Node.js-only APIs (e.g. setTimeout().unref())
 // that crash in Electron's renderer context.
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk/browser';
+import { mcpRegistrationSchema, type McpRegistrationResult } from './mcpServerStore';
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { HarnessDynamicTool } from './HarnessSession';
@@ -204,6 +205,7 @@ const addVaultBridgeSchema = {
 // ── Factory ──────────────────────────────────────────────────────────────────
 
 export interface ObsidianMcpServerOptions {
+  onRegisterMcpServer?: (input: unknown) => Promise<McpRegistrationResult>;
   /** Route agent-triggered file navigation through the host's contextual panel policy. */
   openContextualFile?: (file: TFile, newLeaf: boolean) => Promise<boolean>;
   /** Route agent-triggered Web Viewer navigation through the contextual panel policy. */
@@ -2446,6 +2448,25 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
   // ever appearing in the conversation. The value is stored in the OS keychain
   // and injected into future sessions via secretEnvResolver.
 
+  const boundRegisterMcpServer = tool(
+    'mcp_register_server',
+    'Register a global external MCP server (stdio, HTTP or SSE). Requires a separate host confirmation even when tool approvals are bypassed. Creates only: identical retries are unchanged, conflicting names are rejected. Saved settings apply to newly initialized sessions, not the calling session. Use ${NAME} placeholders for every credential and request_secret to store values; all other literals must be nonsecret. No server is launched or contacted during registration. Scheduled threads cannot prompt for confirmation.',
+    mcpRegistrationSchema.shape,
+    async (args) => {
+      // The direct Codex adapter bypasses SDK schema parsing.
+      const parsed = mcpRegistrationSchema.safeParse(args);
+      let result: McpRegistrationResult;
+      if (!parsed.success) result = { success: false, status: 'invalid', message: 'Invalid MCP configuration. Use credential placeholders and request_secret; check name, transport and fields.' };
+      else if (!options.onRegisterMcpServer) result = { success: false, status: 'unavailable', message: 'Host MCP registration is unavailable in this context.' };
+      else {
+        try { result = await options.onRegisterMcpServer(parsed.data); }
+        catch { result = { success: false, status: 'failed', message: 'MCP registration failed. No credential or configuration details are returned.' }; }
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], ...(!result.success ? { isError: true } : {}) };
+    },
+    { alwaysLoad: true },
+  );
+
   const boundRequestSecret = tool(
     'request_secret',
     [
@@ -2546,6 +2567,7 @@ function createMcpToolSurfaces(app: App, options: ObsidianMcpServerOptions = {})
       boundCronUpdate,
       boundCronDelete,
       boundRequestSecret,
+      boundRegisterMcpServer,
       boundSkillsListInstalled,
       boundSkillsSearch,
       boundSkillsGet,

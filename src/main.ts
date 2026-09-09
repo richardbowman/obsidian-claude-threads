@@ -18,6 +18,8 @@ import type { createClaudeThreadsMcpServers, ProjectSnapshot, ProjectUpdatePatch
 import type { ContextPanelController } from './ContextPanelController';
 import { detectHostName } from './hostEnvironment';
 import { mergeMcpServers } from './mcpServerMerge';
+import { createMcpRegistration } from './mcpServerStore';
+import { McpRegistrationModal } from './confirmModal';
 import type { SkillsManagerView } from './SkillsManagerView';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 // Shared / mobile-safe modules (no Node.js built-in calls at module level)
@@ -432,9 +434,33 @@ export default class ClaudeThreadsPlugin extends Plugin {
     });
     // Use a per-thread factory so the set_working_directory tool can close over the
     // correct threadId without shared mutable state across concurrent sessions.
+    const mcpRegistrationModals = new Set<McpRegistrationModal>();
+    let mcpRegistrationAvailable = true;
+    this.register(() => {
+      mcpRegistrationAvailable = false;
+      for (const modal of mcpRegistrationModals) modal.close();
+    });
+    const registerMcpServer = createMcpRegistration({
+      getSettings: () => this.settings,
+      save: () => this.saveSettings(),
+      confirm: entry => new Promise<boolean>((resolve, reject) => {
+        if (!mcpRegistrationAvailable) { reject(new Error('Host unavailable')); return; }
+        const modal = new McpRegistrationModal(this.app, entry, accepted => {
+          mcpRegistrationModals.delete(modal);
+          resolve(accepted);
+        });
+        mcpRegistrationModals.add(modal);
+        try { modal.open(); }
+        catch (error) { mcpRegistrationModals.delete(modal); reject(error); }
+      }),
+    });
     this.manager.mcpServerFactory = (threadId: string, initialCwd: string) => {
       try {
         const mcpServers = createClaudeThreadsMcpServers(this.app, {
+          onRegisterMcpServer: input => {
+            const caller = this.manager.getThread(threadId);
+            return registerMcpServer(input, mcpRegistrationAvailable && !!caller && !caller.scheduledItemId);
+          },
           enableOpenUrl: (this.settings.enableWebViewerTool ?? true) && isWebViewerEnabled(this.app),
           openContextualFile: async (file) => {
             if (!this.isConversationFirst()) return false;

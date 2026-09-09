@@ -1,4 +1,36 @@
 import { App, Modal } from 'obsidian';
+import type { McpServerEntry } from './mcpServerStore';
+
+/** Host-owned approval, independent of either harness's tool permission mode. */
+export class McpRegistrationModal extends Modal {
+  private confirmed = false;
+  private resolved = false;
+  constructor(app: App, private entry: McpServerEntry, private onResult: (confirmed: boolean) => void) {
+    super(app);
+  }
+  onOpen(): void {
+    this.contentEl.addClass('ct-mcp-registration');
+    this.contentEl.createEl('h2', { text: 'Register MCP server?' });
+    this.contentEl.createEl('p', { text: 'This adds the server globally to Agent Threads settings for all projects and threads.' });
+    this.contentEl.createEl('p', { text: this.entry.type === 'stdio'
+      ? 'Newly initialized sessions may run this command with your account permissions. Registration itself does not run it.'
+      : 'Newly initialized sessions may connect to this endpoint and send configured headers. Registration itself does not connect.' });
+    this.contentEl.createEl('pre', { text: JSON.stringify(this.entry, null, 2), cls: 'ct-mcp-registration-config' });
+    this.contentEl.createEl('p', { text: 'Secret placeholders stay unresolved here. The current session keeps its existing tools.' });
+    const buttons = this.contentEl.createDiv({ cls: 'ct-mcp-registration-buttons' });
+    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    buttons.createEl('button', { text: 'Register server', cls: 'mod-cta' }).addEventListener('click', () => {
+      this.confirmed = true;
+      this.close();
+    });
+  }
+  onClose(): void {
+    this.contentEl.empty();
+    if (this.resolved) return;
+    this.resolved = true;
+    this.onResult(this.confirmed);
+  }
+}
 
 /**
  * Yes/no confirmation dialog. Lived in SkillsManagerView.ts until the archive

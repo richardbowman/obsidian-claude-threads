@@ -461,7 +461,7 @@ Settings → **MCP** lists, adds, edits, and removes the external MCP servers re
   <img src="docs/screenshot-mcp-servers.png" width="800" alt="Settings MCP tab: a list of configured MCP servers, each with a type badge (stdio, http, sse), a one-line summary, and Edit/Remove buttons, plus an Add MCP server button; one row warns that it will be skipped because its secret is not registered" />
 </p>
 
-**These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for new threads only — sessions already running keep whatever MCP servers they started with.
+**These servers are stored in the plugin's own `data.json`** and injected into each session at runtime — on both the Claude and Codex harnesses. Nothing is written to `~/.claude/`, and the `claude` CLI does not see them (register a server with `claude mcp add` if you want it in CLI sessions too). Changes take effect for newly initialized or reinitialized sessions — existing session adapters keep whatever MCP servers they started with.
 
 > Earlier versions kept this list in a `mcpServers` block inside `~/.claude/settings.json`. That was a mistake: Claude Code owns that file, its schema has no top-level `mcpServers` property, and neither the CLI nor the SDK ever read what the plugin wrote there. The plugin no longer reads or writes that file at all. If you have a leftover `mcpServers` block in your `settings.json`, it is inert and safe to delete — re-add those servers here.
 
@@ -472,6 +472,12 @@ A server whose `${VAR_NAME}` placeholders cannot be resolved is **skipped rather
 <p align="center">
   <img src="docs/screenshot-mcp-edit-server.png" width="800" alt="Add/edit MCP server form: a type toggle between Command (stdio) and HTTP or SSE, with Name, Command, Arguments, and Environment variables fields, the env field showing a ${NOTES_API_TOKEN} placeholder" />
 </p>
+
+Agents can also call `mcp_register_server` to propose a server. A host dialog shows the unresolved configuration and asks you to **Register server** or **Cancel**, including when normal tool permissions are bypassed. Approval saves globally for newly initialized Claude and Codex sessions; it does not launch a command, contact an endpoint, or change the calling session's tools. Scheduled threads return an unavailable result instead of waiting for a dialog.
+
+The tool accepts a flat `name`, `type` (`stdio`, `http`, or `sse`), plus `command`/`args`/`env` for stdio or `url`/`headers` for remote servers. An identical retry is unchanged; a different configuration under an existing name is rejected. Built-in and prototype-related names are reserved. Remote URLs must use HTTP(S) and cannot contain embedded credentials.
+
+Use `${NAME}` for every credential and `request_secret` to save its value securely. Common credential fields are validated, but arbitrary argument strings cannot be reliably classified: all literal values must be nonsecret. Registration returns status and required variable names, never resolved credentials. Missing variables are checked when a future session initializes. See [agent registration details](docs/mcp-registration.md).
 
 ### Remote access (mobile)
 

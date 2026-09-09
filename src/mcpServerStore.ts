@@ -17,12 +17,122 @@
  *   live session, and REFUSES to emit a server whose placeholders don't
  *   resolve. See the note on that function.
  *
- * Everything here is pure: no fs, no process spawning. Callers own persistence
- * (`saveSettings()`) and reporting.
+ * No fs or process spawning lives here. Callers own persistence
+ * (`saveSettings()`) and reporting; agent registration coordinates injected
+ * host confirmation and persistence callbacks.
  */
 
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import type { PluginSettings, StoredMcpServer } from './types';
+import { z } from 'zod';
+
+const isReservedMcpName = (name: string): boolean =>
+  ['claude_threads', 'obsidian', '__proto__', 'constructor', 'prototype'].includes(name.toLowerCase());
+
+/** Shared schema, including direct harness calls which do not parse SDK schemas. */
+export const mcpRegistrationSchema = z.object({
+  name: z.string().trim().regex(/^[A-Za-z0-9_-]+$/).refine(name =>
+    !isReservedMcpName(name)),
+  type: z.enum(['stdio', 'http', 'sse']),
+  command: z.string().trim().min(1).optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().trim().min(1).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+}).strict().superRefine((entry, ctx) => {
+  const invalid = () => ctx.addIssue({ code: 'custom', message: 'Invalid MCP configuration. Credentials must use ${NAME} placeholders; use request_secret to store them.' });
+  const credentialKey = /authorization|cookie|token|secret|password|credential|api[-_]?key/i;
+  const placeholder = /^(?:Bearer\s+|Basic\s+)?\$\{[A-Z_][A-Z0-9_]*\}$/i;
+  if (entry.type === 'stdio') {
+    if (!entry.command || entry.url !== undefined || entry.headers !== undefined) invalid();
+    for (let i = 0; i < (entry.args?.length ?? 0); i++) {
+      const arg = entry.args![i];
+      if (arg.startsWith('-') && credentialKey.test(arg.split('=')[0])) {
+        const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : entry.args![++i];
+        if (!value || !placeholder.test(value)) invalid();
+      }
+    }
+  } else {
+    if (!entry.url || entry.command !== undefined || entry.args !== undefined || entry.env !== undefined) invalid();
+    try {
+      const url = new URL(entry.url ?? '');
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) invalid();
+      url.searchParams.forEach((value, key) => { if (credentialKey.test(key) && !placeholder.test(value)) invalid(); });
+    } catch { invalid(); }
+  }
+  for (const record of [entry.env, entry.headers]) {
+    for (const [key, value] of Object.entries(record ?? {})) {
+      if (['__proto__', 'constructor', 'prototype'].includes(key) || (credentialKey.test(key) && !placeholder.test(value))) invalid();
+    }
+  }
+});
+
+export interface McpRegistrationResult {
+  success: boolean;
+  status: 'registered' | 'unchanged' | 'conflict' | 'invalid' | 'cancelled' | 'unavailable' | 'failed';
+  message: string;
+  requiredVariables?: string[];
+}
+
+/** One instance per plugin, shared across all per-thread MCP servers. */
+export function createMcpRegistration(host: {
+  getSettings: () => Pick<PluginSettings, 'mcpServers'>;
+  confirm?: (entry: McpServerEntry) => Promise<boolean>;
+  save: () => Promise<void>;
+}) {
+  let queue: Promise<unknown> = Promise.resolve();
+  return (input: unknown, interactive = true): Promise<McpRegistrationResult> => {
+    const parsed = mcpRegistrationSchema.safeParse(input);
+    const result = (status: McpRegistrationResult['status'], message: string): McpRegistrationResult => ({
+      success: status === 'registered' || status === 'unchanged', status, message,
+    });
+    if (!parsed.success) return Promise.resolve(result('invalid', 'Invalid MCP configuration. Check the server name, transport and fields. Credentials must use ${NAME} placeholders; use request_secret to store them.'));
+    const entry = parsed.data;
+    if (!interactive || !host.confirm) return Promise.resolve(result('unavailable', 'Interactive host confirmation is unavailable. Register this server from an interactive thread.'));
+    const config = toStoredServer(entry);
+    const variables = new Set<string>();
+    collectPlaceholders(config, variables);
+    const successResult = (status: 'registered' | 'unchanged', message: string): McpRegistrationResult => ({
+      ...result(status, message + (variables.size ? ' Store credential variables with request_secret; missing variables cause the server to be skipped.' : '')),
+      requiredVariables: [...variables].sort(),
+    });
+    // Sorted record keys make semantic retries independent of object insertion order.
+    const stable = (value: unknown): string => JSON.stringify(value, (_key, v) =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+    const collision = (): McpRegistrationResult | undefined => {
+      const existing = host.getSettings().mcpServers;
+      if (!Object.prototype.hasOwnProperty.call(existing ?? {}, entry.name)) return;
+      return stable(normalizeStoredServer(existing[entry.name])) === stable(config)
+        ? successResult('unchanged', 'An identical global MCP configuration already exists. Newly initialized sessions use it.')
+        : result('conflict', 'That MCP server name already exists with a different configuration. No changes were made.');
+    };
+    const transaction = async (): Promise<McpRegistrationResult> => {
+      const prior = collision();
+      if (prior) return prior;
+      if (!interactive || !host.confirm) return result('unavailable', 'Interactive host confirmation is unavailable. Register this server from an interactive thread.');
+      try {
+        if (!await host.confirm({ ...entry })) return result('cancelled', 'Registration cancelled. No changes were made.');
+      } catch { return result('unavailable', 'Host confirmation could not be shown. No changes were made.'); }
+      const after = collision();
+      if (after) return after;
+      const settings = host.getSettings();
+      settings.mcpServers ??= {};
+      settings.mcpServers[entry.name] = config;
+      try { await host.save(); }
+      catch {
+        // Preserve settings edits that occurred during the asynchronous save.
+        const current = host.getSettings().mcpServers;
+        if (current?.[entry.name] === config) delete current[entry.name];
+        return result('failed', 'MCP registration could not be saved. Retry after checking settings storage.');
+      }
+      return successResult('registered', 'Saved globally. Newly initialized sessions can start or connect to this server; the current session is unchanged.');
+    };
+    const pending = queue.then(transaction);
+    queue = pending.catch(() => undefined);
+    return pending;
+  };
+}
 
 /** Server names must be safe to use as a JSON object key / shell-ish identifier. */
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -143,6 +253,7 @@ export function saveMcpServer(
   if (!NAME_PATTERN.test(name)) {
     return { ok: false, error: 'Name may only contain letters, numbers, hyphens, and underscores.' };
   }
+  if (isReservedMcpName(name)) return { ok: false, error: 'That MCP server name is reserved.' };
   if (entry.type !== 'stdio' && entry.type !== 'http' && entry.type !== 'sse') {
     return { ok: false, error: `Unsupported server type: ${String(entry.type)}` };
   }

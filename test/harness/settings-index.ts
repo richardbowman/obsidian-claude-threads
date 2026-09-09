@@ -2,6 +2,15 @@ import './obsidian-mock'; // must be first — sets up HTMLElement.prototype
 import { ClaudeThreadsSettingTab, RequestSecretModal } from '../../src/SettingsTab';
 import { DEFAULT_SETTINGS, type PluginSettings, type Project, type ScheduledItem } from '../../src/types';
 import { mockApp } from './obsidian-mock';
+import { McpRegistrationModal } from '../../src/confirmModal';
+
+(window as any).__openMcpRegistration = (type: 'stdio' | 'http' = 'stdio') => {
+  (window as any).__mcpRegistrationResult = undefined;
+  const entry = type === 'stdio'
+    ? { name: 'example-tools', type, command: 'npx', args: ['-y', '@example/mcp-server'], env: { API_TOKEN: '${EXAMPLE_TOKEN}' } }
+    : { name: 'example-tools', type, url: 'https://mcp.example.com/agent/tools', headers: { Authorization: 'Bearer ${EXAMPLE_TOKEN}' } };
+  new McpRegistrationModal(mockApp as any, entry, result => { (window as any).__mcpRegistrationResult = result; }).open();
+};
 
 const fixtureProjects: Project[] = [
   {

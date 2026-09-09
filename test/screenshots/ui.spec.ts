@@ -1730,6 +1730,39 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp.png', { fullPage: true });
   });
 
+  test('settings — MCP registration host confirmation', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    await page.evaluate(() => (window as any).__openMcpRegistration());
+    await expect(page.locator('.ct-mcp-registration')).toBeVisible();
+    await shot(page, 'mcp-registration.png');
+    await page.getByRole('button', { name: 'Register server', exact: true }).click();
+    expect(await page.evaluate(() => (window as any).__mcpRegistrationResult)).toBe(true);
+    await page.evaluate(() => (window as any).__openMcpRegistration('http'));
+    await expect(page.locator('.ct-mcp-registration')).toContainText('connect to this endpoint');
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    expect(await page.evaluate(() => (window as any).__mcpRegistrationResult)).toBe(false);
+  });
+
+  for (const viewport of [{ width: 390, height: 844 }, { width: 375, height: 667 }]) {
+    test(`MCP registration fits narrow viewport ${viewport.width}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto('file://' + path.resolve('test/harness/settings.html'));
+      await page.evaluate(() => (window as any).__openMcpRegistration());
+      const content = page.locator('.ct-mcp-registration');
+      await expect(content).toBeVisible();
+      const box = await content.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      expect(await content.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      const button = page.getByRole('button', { name: 'Register server', exact: true });
+      expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await page.screenshot({ path: test.info().outputPath(`mcp-registration-${viewport.width}.png`) });
+      await button.click();
+      expect(await page.evaluate(() => (window as any).__mcpRegistrationResult)).toBe(true);
+    });
+  }
+
   test('settings — mcp edit server form', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
