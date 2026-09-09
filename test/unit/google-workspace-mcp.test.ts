@@ -135,4 +135,26 @@ describe('Google Workspace MCP connection', () => {
     expect((await call(config)).status).toBe(502);
     expect((await call(config)).status).toBe(200);
   });
+  it('persists identity before forwarding and refuses a changed account after reload', async () => {
+    const f = setup();
+    const persistence = { bindings: {}, save: vi.fn(async () => {}) };
+    const first = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, persistence); instances.push(first);
+    await first.configure({ docs: true });
+    expect((await call(first.serversForThread('thread')['google-docs'])).status).toBe(200);
+    expect(persistence.save).toHaveBeenCalled();
+    expect(JSON.stringify(persistence.bindings)).not.toContain('SECRET');
+    first.close();
+    f.setTokens({ accessToken: 'SECOND', refreshToken: 'SECOND_REFRESH', expiresAt: 1 });
+    const second = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, persistence); instances.push(second);
+    await second.configure({ docs: true });
+    expect(second.serversForThread('thread')).toEqual({});
+    expect(second.serversForThread('new-thread')['google-docs']).toBeDefined();
+  });
+  it('fails closed if initial binding cannot be persisted', async () => {
+    const f = setup();
+    const proxy = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, { bindings: {}, save: async () => { throw new Error('disk failure'); } }); instances.push(proxy);
+    await proxy.configure({ docs: true });
+    expect((await call(proxy.serversForThread('thread')['google-docs'])).status).toBe(502);
+    expect(f.fetchUpstream).not.toHaveBeenCalled();
+  });
 });

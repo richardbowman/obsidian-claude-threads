@@ -817,6 +817,8 @@ export interface PluginSettings {
   mcpServers: Record<string, StoredMcpServer>;
   /** Opt-in Google-provided MCP toolsets, authenticated by Google Docs Sync. */
   googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides', boolean>>;
+  /** Nonsecret identity/service pinning; local bearer capabilities are never persisted. */
+  googleWorkspaceBindings?: Record<string, import('./GoogleWorkspaceMcp').GoogleWorkspaceBinding>;
   /**
    * Set to true after the orphaned-note archive scan has run at least once with
    * nothing left to clean up. Prevents a full vault file-read scan on every startup

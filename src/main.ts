@@ -384,8 +384,10 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const skillPaths = require('./skillPaths') as typeof import('./skillPaths');
 
     const { GoogleWorkspaceMcp } = require('./GoogleWorkspaceMcp') as typeof import('./GoogleWorkspaceMcp');
+    this.settings.googleWorkspaceBindings ??= {};
     this.googleWorkspaceMcp = new GoogleWorkspaceMcp(() =>
-      (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'));
+      (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'), undefined, undefined,
+      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() });
     await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
     this.register(() => this.googleWorkspaceMcp?.close());
 

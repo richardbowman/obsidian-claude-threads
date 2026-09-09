@@ -1747,6 +1747,35 @@ test.describe('Agent Threads UI', () => {
     }
   });
 
+  for (const width of [1280, 390, 375]) {
+    test(`Google Workspace settings at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto('file://' + path.resolve('test/harness/settings.html'));
+      await page.click('.ct-settings-tab-btn:has-text("MCP")');
+      await page.evaluate(() => { document.getElementById('app')!.style.height = 'auto'; });
+      await expect(page.getByText('Google Workspace', { exact: true })).toBeVisible();
+      await expect(page.locator('.setting-item-name').filter({ hasText: /^Google (Docs|Drive|Sheets|Slides)$/ })).toHaveCount(4);
+      await shot(page, `google-workspace-settings-${width}.png`, { fullPage: true });
+    });
+  }
+
+  test('Google Workspace connected settings update transport selection after save', async ({ page }) => {
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    await page.evaluate(() => {
+      const calls: string[] = [];
+      (window as any).__workspaceCalls = calls;
+      (window as any).__settingsPlugin.saveSettings = async () => { calls.push('save'); };
+      (window as any).__settingsPlugin.googleWorkspaceMcp = {
+        status: () => 'Connected through Google Docs Sync. Google validates service access when a thread connects.',
+        configure: async (selection: unknown) => { calls.push(JSON.stringify(selection)); },
+      };
+    });
+    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    await expect(page.getByText('Connected through Google Docs Sync.', { exact: false })).toBeVisible();
+    await page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: /^Google Sheets$/ }) }).locator('.checkbox-container').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__workspaceCalls)).toEqual(['save', '{"sheets":true}']);
+  });
+
   test('settings — mcp edit server form', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });

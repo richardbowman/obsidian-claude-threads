@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { createHash, randomBytes } from 'crypto';
 import { once } from 'events';
+import { request as httpsRequest } from 'https';
+import { Readable } from 'stream';
 
 export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides'] as const;
 type Service = typeof GOOGLE_SERVICES[number];
@@ -19,10 +21,33 @@ interface Binding {
   capability: string;
   services: Service[];
   revoked: boolean;
+  ready: Promise<void>;
+  metadata: GoogleWorkspaceBinding;
 }
+export interface GoogleWorkspaceBinding { fingerprint: string; services: Service[]; revoked?: boolean }
+interface Persistence { bindings: Record<string, GoogleWorkspaceBinding>; save(): Promise<void> }
+type Upstream = (url: string, options: RequestInit) => Promise<Response>;
 type Config = { type: 'http'; url: string; headers: Record<string, string> };
 const requestHeaders = ['accept', 'content-type', 'mcp-protocol-version', 'mcp-session-id', 'last-event-id'];
-const responseHeaders = ['content-type', 'mcp-session-id', 'mcp-protocol-version', 'retry-after', 'cache-control'];
+const responseHeaders = ['content-type', 'content-encoding', 'mcp-session-id', 'mcp-protocol-version', 'retry-after', 'cache-control'];
+
+/** Node HTTPS bypasses renderer CSP/CORS; unlike browser fetch it never follows redirects. */
+export const googleWorkspaceRequest: Upstream = (url, options) => new Promise((resolve, reject) => {
+  const request = httpsRequest(url, { method: options.method, headers: options.headers as Record<string, string>, signal: options.signal ?? undefined }, incoming => {
+    const status = incoming.statusCode ?? 502;
+    if ([301, 302, 303, 307, 308].includes(status)) { incoming.destroy(); reject(new Error('redirect-rejected')); return; }
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(incoming.headers)) {
+      if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+    }
+    const body = [204, 205, 304].includes(status) ? null : Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>;
+    if (!body) incoming.resume();
+    resolve(new Response(body, { status, headers }));
+  });
+  request.on('error', reject);
+  if (options.body) request.write(options.body);
+  request.end();
+});
 
 /** Transport only: Google owns tool discovery, schemas, operations, and results. */
 export class GoogleWorkspaceMcp {
@@ -36,7 +61,8 @@ export class GoogleWorkspaceMcp {
   private tokenQueue: Promise<unknown> = Promise.resolve();
   private lastFailure = '';
 
-  constructor(private readonly getPlugin: () => unknown, private readonly upstream: typeof fetch = fetch, private readonly tokenTimeoutMs = 30_000) {}
+  constructor(private readonly getPlugin: () => unknown, private readonly upstream: Upstream = googleWorkspaceRequest, private readonly tokenTimeoutMs = 30_000,
+    private readonly persistence: Persistence = { bindings: {}, save: async () => {} }) {}
 
   private connection(): DocsSync | undefined {
     const value = this.getPlugin() as Partial<DocsSync> | undefined;
@@ -45,7 +71,7 @@ export class GoogleWorkspaceMcp {
   }
 
   private fingerprint(plugin: DocsSync): string {
-    return createHash('sha256').update(JSON.stringify([plugin.settings.authProxyUrl, plugin.tokenStore.get()?.refreshToken ?? null])).digest('hex');
+    return createHash('sha256').update(JSON.stringify([plugin.settings.authProxyUrl.trim().replace(/\/+$/, ''), plugin.tokenStore.get()?.refreshToken ?? null])).digest('hex');
   }
 
   status(): string {
@@ -61,6 +87,11 @@ export class GoogleWorkspaceMcp {
     for (const binding of this.bindings.values()) {
       if (binding.services.some(service => !this.enabled[service])) binding.revoked = true;
     }
+    let changed = false;
+    for (const binding of Object.values(this.persistence.bindings)) {
+      if (Array.isArray(binding.services) && binding.services.some(service => !this.enabled[service]) && !binding.revoked) { binding.revoked = true; changed = true; }
+    }
+    if (changed) await this.persistence.save();
     if (this.closed || !GOOGLE_SERVICES.some(service => selection[service]) || this.server?.listening) return;
     if (this.starting) return this.starting;
     this.starting = new Promise<void>((resolve) => {
@@ -86,7 +117,18 @@ export class GoogleWorkspaceMcp {
     const plugin = this.connection();
     if (!plugin || plugin.tokenStore.supportsConnectionGuard !== true || !plugin.tokenStore.get()?.refreshToken || !this.origin || this.closed) return {};
     if (!binding) {
-      binding = { plugin, fingerprint: this.fingerprint(plugin), capability: randomBytes(32).toString('hex'), services: GOOGLE_SERVICES.filter(service => this.enabled[service]), revoked: false };
+      const fingerprint = this.fingerprint(plugin);
+      const stored = this.persistence.bindings[threadId];
+      if (stored && (stored.revoked || stored.fingerprint !== fingerprint || !Array.isArray(stored.services))) {
+        this.lastFailure = 'Google connection changed. Start a new thread after reconnecting; existing Google access was revoked.';
+        return {};
+      }
+      const services = stored ? GOOGLE_SERVICES.filter(service => stored.services.includes(service) && this.enabled[service]) : GOOGLE_SERVICES.filter(service => this.enabled[service]);
+      if (!services.length) return {};
+      this.persistence.bindings[threadId] = { fingerprint, services };
+      const ready = Promise.resolve().then(() => this.persistence.save());
+      void ready.catch(() => { this.lastFailure = 'Google connection binding could not be saved. Check vault storage and start a new thread.'; });
+      binding = { plugin, fingerprint, capability: randomBytes(32).toString('hex'), services, revoked: false, ready, metadata: this.persistence.bindings[threadId] };
       this.bindings.set(threadId, binding);
       this.lastFailure = '';
     }
@@ -100,6 +142,8 @@ export class GoogleWorkspaceMcp {
     if (this.connection() !== binding.plugin || binding.plugin.tokenStore.supportsConnectionGuard !== true
       || !binding.plugin.tokenStore.get()?.refreshToken || this.fingerprint(binding.plugin) !== binding.fingerprint) {
       binding.revoked = true;
+      binding.metadata.revoked = true;
+      void this.persistence.save().catch(() => { this.lastFailure = 'Google connection revocation could not be saved. Check vault storage.'; });
       this.lastFailure = 'Google connection changed. Start a new thread after reconnecting; existing Google access was revoked.';
       return false;
     }
@@ -109,6 +153,9 @@ export class GoogleWorkspaceMcp {
   /** Archive/delete cleanup. Call with the manager's retained thread IDs. */
   retainThreads(ids: Set<string>): void {
     for (const [id, binding] of this.bindings) if (!ids.has(id)) { binding.revoked = true; this.bindings.delete(id); }
+    let changed = false;
+    for (const id of Object.keys(this.persistence.bindings)) if (!ids.has(id)) { delete this.persistence.bindings[id]; changed = true; }
+    if (changed) void this.persistence.save().catch(() => { this.lastFailure = 'Google connection cleanup could not be saved. Check vault storage.'; });
   }
 
   close(): void {
@@ -129,6 +176,15 @@ export class GoogleWorkspaceMcp {
     } else response.destroy();
   }
 
+  private abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const cancel = () => reject(new Error('cancelled'));
+      if (signal.aborted) { cancel(); return; }
+      signal.addEventListener('abort', cancel, { once: true });
+      work.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel));
+    });
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.headers.host !== this.origin.slice('http://'.length) || (request.headers.origin && request.headers.origin !== this.origin)) {
       this.reply(response, 403, 'Local native MCP clients only.'); return;
@@ -144,6 +200,7 @@ export class GoogleWorkspaceMcp {
     const timeout = setTimeout(() => controller.abort(), 300_000);
     response.on('close', () => controller.abort());
     try {
+      await this.abortable(binding.ready, controller.signal);
       const chunks: Buffer[] = [];
       let size = 0;
       for await (const chunk of request) {
@@ -170,7 +227,7 @@ export class GoogleWorkspaceMcp {
         return token;
       });
       this.tokenQueue = tokenJob;
-      const token = await tokenJob;
+      const token = await this.abortable(tokenJob, controller.signal);
       const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
       for (const name of requestHeaders) {
         const value = request.headers[name];
