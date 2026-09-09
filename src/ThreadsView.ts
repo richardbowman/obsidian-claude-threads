@@ -212,6 +212,7 @@ export class ThreadsView extends ItemView {
   private switcherOutsideTimer: ReturnType<typeof setTimeout> | null = null;
   private nativeHeaderMode = false;
   private nativeSwitchActionEl: HTMLElement | null = null;
+  private nativeRenameActionEl: HTMLElement | null = null;
   private nativeManagerNotesActionEl: HTMLElement | null = null;
   private nativeNewThreadActionEl: HTMLElement | null = null;
   private nativeCloseThreadActionEl: HTMLElement | null = null;
@@ -350,6 +351,13 @@ export class ThreadsView extends ItemView {
     return 'message-square';
   }
 
+  onPaneMenu(menu: Menu, _source: string): void {
+    const id = this.activeThreadId;
+    if (!id || !this.manager.getThread(id)) return;
+    menu.addItem((item) => item.setTitle('Rename thread').setIcon('pencil')
+      .onClick(() => this.renameThread(id)));
+  }
+
   getState(): Record<string, unknown> {
     return {
       ...super.getState(),
@@ -375,6 +383,15 @@ export class ThreadsView extends ItemView {
   async onOpen(): Promise<void> {
     this.buildUI();
     this.createNativeHeaderActions();
+    // Delegate within the view so host title refreshes cannot detach the handler.
+    this.registerDomEvent(this.containerEl, 'dblclick', (event) => {
+      const title = this.containerEl.querySelector(':scope > .view-header .view-header-title');
+      if (this.nativeHeaderMode && title?.contains(event.target as Node)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.activeThreadId) this.renameThread(this.activeThreadId);
+      }
+    });
     this.syncHeaderMode();
     this.registerEvent(this.app.workspace.on('layout-change', () => {
       if (this.headerSyncFrame !== null) cancelAnimationFrame(this.headerSyncFrame);
@@ -737,7 +754,7 @@ export class ThreadsView extends ItemView {
     this.titleEl.addEventListener('click', (e) => this.openThreadSwitcher(e));
     this.titleEl.addEventListener('dblclick', (e) => {
       e.stopPropagation();
-      if (this.activeThreadId) this.renameThread(this.activeThreadId, this.titleTextEl);
+      if (this.activeThreadId) this.renameThread(this.activeThreadId);
     });
     this.ephemeralBadgeEl = titleRow.createSpan({ cls: 'ct-ephemeral-badge ct-hidden', text: 'ephemeral' });
 
@@ -978,6 +995,9 @@ export class ThreadsView extends ItemView {
     if (this.nativeSwitchActionEl) return;
     this.nativeSwitchActionEl = this.addAction('message-square', 'Switch thread', (event) => this.openThreadSwitcher(event));
     this.nativeSwitchActionEl.addClass('ct-native-switch-action');
+    this.nativeRenameActionEl = this.addAction('pencil', 'Rename thread', () => {
+      if (this.activeThreadId) this.renameThread(this.activeThreadId);
+    });
     this.nativeManagerNotesActionEl = this.addAction('sticky-note', 'Manager notes', (event) => {
       event.stopPropagation();
       this.managerNotesCollapsed = !this.managerNotesCollapsed;
@@ -997,6 +1017,7 @@ export class ThreadsView extends ItemView {
     this.titleRowEl?.toggleClass('ct-hidden', useNativeHeader);
     for (const action of [
       this.nativeSwitchActionEl,
+      this.nativeRenameActionEl,
       this.nativeManagerNotesActionEl,
       this.nativeNewThreadActionEl,
       this.nativeCloseThreadActionEl,
@@ -6028,11 +6049,10 @@ export class ThreadsView extends ItemView {
         cls: 'ct-switcher-new-btn ct-switcher-rename-btn',
         attr: { title: 'Rename current thread', 'aria-label': 'Rename current thread' },
       });
-      renameBtn.createSpan({ cls: 'ct-title-text', text: activeThread.title });
+      renameBtn.createSpan({ cls: 'ct-title-text', text: 'Rename thread' });
       renameBtn.addEventListener('click', (renameEvent) => {
         renameEvent.stopPropagation();
-        const label = renameBtn.querySelector<HTMLElement>('.ct-title-text');
-        if (label) this.renameThread(activeThread.id, label);
+        this.renameThread(activeThread.id);
       });
     }
     const newBtn = footer.createEl('button', { cls: 'ct-switcher-new-btn', text: '+ New chat' });
@@ -6166,45 +6186,55 @@ export class ThreadsView extends ItemView {
     // goes through.
   }
 
-  private renameThread(id: string, labelEl: HTMLElement): void {
-    const current = labelEl.textContent ?? '';
-    const input = document.createElement('input');
-    input.className = 'ct-title-rename-input';
-    input.value = current;
-    labelEl.replaceWith(input);
+  private renameThread(id: string): void {
+    const thread = this.manager.getThread(id);
+    if (!thread) return;
+    this.closeSwitcherPanel();
+    new RenameThreadModal(this.app, thread.title, async (title) => {
+      const current = this.manager.getThread(id);
+      if (!current || title === current.title) return;
+      current.titleUserSet = true;
+      this.manager.renameThread(id, title);
+      this.renderTitleBar();
+      if (id === this.activeThreadId) this.refreshLeafHeader();
+      await this.plugin.saveSettings();
+    }).open();
+  }
+}
+
+class RenameThreadModal extends Modal {
+  constructor(app: App, private current: string, private save: (title: string) => Promise<void>) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.titleEl.setText('Rename thread');
+    const input = this.contentEl.createEl('input', {
+      cls: 'ct-title-rename-input',
+      attr: { type: 'text', 'aria-label': 'Thread name' },
+    });
+    input.value = this.current;
+    const buttons = this.contentEl.createDiv('ct-skills-modal-btns');
+    buttons.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
+    const saveButton = buttons.createEl('button', { text: 'Rename', cls: 'mod-cta' });
+    let submitted = false;
+    const submit = () => {
+      const title = input.value.trim();
+      if (submitted || !title) return;
+      submitted = true;
+      this.close();
+      void this.save(title).catch((error: unknown) => {
+        console.error('[claude-threads] failed to save thread name:', error);
+        new Notice('The thread was renamed, but saving failed. Try again before closing the app.');
+      });
+    };
+    saveButton.addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); submit(); }
+      if (event.key === 'Escape') { event.stopPropagation(); this.close(); }
+    });
     input.focus();
     input.select();
-
-    const commit = () => {
-      const val = input.value.trim() || current;
-      this.manager.renameThread(id, val);
-      // Only lock the title as user-set when the user actually changed it.
-      // Blur/Escape with no change should not prevent future auto-titling.
-      if (val !== current) {
-        const t = this.manager.getThread(id);
-        if (t) t.titleUserSet = true;
-      }
-      this.plugin.saveSettings();
-      if (id === this.activeThreadId) this.refreshLeafHeader();
-      const newLabel = document.createElement('span');
-      newLabel.className = 'ct-title-text';
-      newLabel.textContent = val;
-      newLabel.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        this.renameThread(id, newLabel);
-      });
-      input.replaceWith(newLabel);
-      this.renderTitleBar();
-    };
-
-    input.addEventListener('blur', commit);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') commit();
-      if (e.key === 'Escape') {
-        input.value = current;
-        commit();
-      }
-    });
   }
 }
 

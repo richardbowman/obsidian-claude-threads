@@ -260,6 +260,10 @@ export class ItemView {
   registerEvent(ref: { name: string; callback: WorkspaceCallback }): void {
     this.register(() => mockWorkspace.offref(ref));
   }
+  registerDomEvent(el: HTMLElement, type: string, handler: EventListener): void {
+    el.addEventListener(type, handler);
+    this.register(() => el.removeEventListener(type, handler));
+  }
 
   unload(): void {
     for (const cleanup of this.cleanupCallbacks.splice(0).reverse()) cleanup();

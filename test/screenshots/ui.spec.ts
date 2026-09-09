@@ -44,6 +44,42 @@ test.describe('Agent Threads UI', () => {
     await page.clock.setFixedTime(new Date('2026-01-15T10:00:00Z'));
   });
 
+  test('thread rename supports repeated edits, cancellation, and empty names', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${harnessUrl}?document`);
+    await page.waitForSelector('.ct-messages');
+    const input = page.getByRole('textbox', { name: 'Thread name', exact: true });
+    await page.getByRole('button', { name: 'Rename thread', exact: true }).click();
+    await expect(input).toHaveValue('Fix auth middleware');
+    await shot(page.locator('#app').locator('..'), 'rename-thread.png');
+    await input.fill('First name');
+    const saves = await page.evaluate(() => (window as any).__saveSettingsCalls ?? 0);
+    await input.press('Enter');
+    await expect(page.locator('.view-header-title')).toHaveText('First name');
+    expect(await page.evaluate(() => (window as any).__saveSettingsCalls)).toBe(saves + 1);
+    await page.locator('.view-header-title').dblclick();
+    await expect(input).toHaveValue('First name');
+    await input.fill('Cancelled name');
+    await input.press('Escape');
+    await expect(input).toHaveCount(0);
+    await expect(page.locator('.view-header-title')).toHaveText('First name');
+    await page.locator('.view-header-title').dblclick();
+    await input.fill('   ');
+    await input.press('Enter');
+    await expect(input).toBeVisible();
+    await input.fill('  Second name  ');
+    await page.getByRole('button', { name: 'Rename', exact: true }).click();
+    await expect(page.locator('.view-header-title')).toHaveText('Second name');
+    await page.evaluate(() => (window as any).__setDocumentPane(false));
+    await page.locator('.ct-title-btn').dblclick();
+    await expect(input).toHaveValue('Second name');
+    await input.fill('Third name');
+    await input.press('Enter');
+    await page.locator('.ct-title-btn').dblclick();
+    await expect(input).toHaveValue('Third name');
+    await input.press('Escape');
+  });
+
   test('document pane uses the native header and adapts when moved to a sidebar', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(`${harnessUrl}?document`);
@@ -74,7 +110,7 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-switcher-rename-btn')).toBeVisible();
     await expect(page.locator('.ct-switcher-panel')).toHaveClass(/ct-switcher-panel-native/);
     await page.locator('.ct-switcher-rename-btn').click();
-    const renameInput = page.locator('.ct-switcher-footer .ct-title-rename-input');
+    const renameInput = page.getByRole('textbox', { name: 'Thread name', exact: true });
     await expect(renameInput).toHaveValue('HipTrip feature ideas');
     await renameInput.fill('HipTrip roadmap workshop');
     await renameInput.press('Enter');
@@ -88,7 +124,6 @@ test.describe('Agent Threads UI', () => {
     });
     await expect(page.locator('.view-action[aria-label="Manager notes"]')).toBeVisible();
 
-    await page.locator('.view-action[aria-label^="Switch thread"]').click();
     await expect(page.locator('.ct-switcher-panel')).toHaveCount(0);
 
     await page.locator('#app').evaluate((element) => {
