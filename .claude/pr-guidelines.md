@@ -98,6 +98,16 @@ a third time.
 
 ## Final PR Checklist
 
+### QA evidence in the PR
+
+Use `.github/pull_request_template.md` and make the PR description self-contained:
+
+- Summarize the behavior checked and the observed outcome. List checks actually run with pass/fail counts, intentional skips, and limitations. For existing failures, include the unchanged comparison commit and reproduction evidence; do not describe the suite as passing.
+- For UI changes, embed representative screenshots with Markdown image syntax so reviewers can see them in the PR. Label each image with its viewport, UI state, and capture source (for example, Playwright harness or live Obsidian). Use synthetic fixtures and check images for private content before publishing.
+- For committed PNGs, use a commit-pinned URL such as `https://raw.githubusercontent.com/rbcodelabs/obsidian-claude-threads/<full-commit-sha>/<path-to-image.png>`. Images must match the reviewed behavior; refresh their links when the pictured UI changes.
+- Local filesystem paths, vault notes, and descriptions of images are not substitutes for rendered screenshots or QA outcomes. A vault report may supplement the PR, but reviewers must not need vault access.
+- Distinguish harness coverage from live-app or device verification. Claim only checks actually performed. For changes without UI impact, mark screenshots **N/A** and briefly explain why.
+
 Present this as a completed checklist before opening any PR. Every item is mandatory — do not open a PR until all are checked:
 
 - [ ] `npx tsc --noEmit` — no errors
@@ -107,4 +117,5 @@ Present this as a completed checklist before opening any PR. Every item is manda
 - [ ] **README.md / docs/ updated** — any new user-facing behavior or UI change is documented; if you touched a feature, re-read the relevant README section and update it
 - [ ] **claude-threads-site docs updated** — if this PR changes user-facing plugin behavior, the corresponding page(s) in `claude-threads-site/src/content/docs/` are updated or created (or the PR description explicitly states no public doc page is affected)
 - [ ] Screenshots regenerated (`pnpm test:screenshots:update`) if desktop UI changed
+- [ ] PR includes self-contained QA outcomes and rendered, labeled screenshots for UI changes (or an explicit N/A reason)
 - [ ] PR title and description explain the *why*, not just the *what*
