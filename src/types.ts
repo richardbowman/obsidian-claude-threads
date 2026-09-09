@@ -815,6 +815,8 @@ export interface PluginSettings {
    * that resolves their `${VAR}` placeholders in one file instead of two.
    */
   mcpServers: Record<string, StoredMcpServer>;
+  /** Opt-in Google-provided MCP toolsets, authenticated by Google Docs Sync. */
+  googleWorkspaceMcp?: Partial<Record<'docs' | 'drive' | 'sheets' | 'slides', boolean>>;
   /**
    * Set to true after the orphaned-note archive scan has run at least once with
    * nothing left to clean up. Prevents a full vault file-read scan on every startup

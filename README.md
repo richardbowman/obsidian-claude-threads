@@ -455,6 +455,42 @@ Without elicitation support the session would stall indefinitely with no visible
 
 ### Managing MCP servers
 
+#### Google Workspace
+
+On desktop Geode and Obsidian, Settings → **MCP → Google Workspace** offers
+**Google Docs**, **Google Drive**, **Google Sheets**, and **Google Slides**.
+All four start disabled. Enable the services you want, then start a new thread.
+Google's servers supply their complete read and write toolsets and schemas; Claude
+Threads does not implement a separate set of Google tools. Interactive and newly
+scheduled threads inherit the same selection on Claude and Codex, with their
+existing permission behavior.
+
+Install and connect Google Docs Sync first. This integration requires its guarded
+connection refresh support (`tokenStore.supportsConnectionGuard`); older builds
+show an update instruction. The auth service must request the Docs, Drive, Sheets,
+and Slides scopes. After updating the auth service, disconnect and reconnect
+Google Docs Sync to grant the additional scopes. A corporate auth host can be
+selected through Google Docs Sync's **Auth proxy URL** setting; disconnect the
+old account before changing it.
+
+Google Workspace MCP is a Developer Preview. Enroll the OAuth client's Cloud
+project, enable each selected product API and MCP API, and obtain Workspace
+administrator access as needed. See Google's [setup guide](https://developers.google.com/workspace/guides/configure-mcp-servers)
+and [preview program](https://developers.google.com/workspace/preview).
+
+Access tokens are refreshed inside Google Docs Sync. The harness receives only an
+ephemeral credential for a loopback transport; no Google token is written to MCP
+configuration. Missing or incompatible Google Docs Sync does not prevent a thread
+from starting; its Google services are omitted and Settings → MCP explains why.
+Disabling a service revokes existing Google connections. Reconnecting accounts,
+changing auth hosts, or refresh-token rotation requires a new thread; ordinary
+access-token refresh remains automatic. Google may report missing scopes, service
+enablement, document access, or preview enrollment during discovery/tool calls.
+The transport forwards these errors without pretending that initialization alone
+validates access. Corporate live validation of all four services remains pending.
+
+#### Custom servers
+
 Settings → **MCP** lists, adds, edits, and removes the external MCP servers referenced above (Compass, Helio, or any other HTTP/SSE/stdio server) — no manual JSON editing required for the common case.
 
 <p align="center">

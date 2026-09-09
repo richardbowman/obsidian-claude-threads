@@ -1730,6 +1730,23 @@ test.describe('Agent Threads UI', () => {
     await shot(page, 'settings-mcp.png', { fullPage: true });
   });
 
+  test('Google Workspace services are opt-in and persisted independently', async ({ page }) => {
+    await page.goto('file://' + path.resolve('test/harness/settings.html'));
+    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
+      const toggle = page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container');
+      await expect(toggle).not.toHaveClass(/is-enabled/);
+      await toggle.click();
+      await expect(toggle).toHaveClass(/is-enabled/);
+    }
+    await expect(page.getByText('Google Workspace requires desktop Google Docs Sync with a connected account.', { exact: true })).toBeVisible();
+    await page.click('.ct-settings-tab-btn:has-text("General")');
+    await page.click('.ct-settings-tab-btn:has-text("MCP")');
+    for (const name of ['Google Docs', 'Google Drive', 'Google Sheets', 'Google Slides']) {
+      await expect(page.locator('.setting-item').filter({ has: page.locator('.setting-item-name', { hasText: new RegExp(`^${name}$`) }) }).locator('.checkbox-container')).toHaveClass(/is-enabled/);
+    }
+  });
+
   test('settings — mcp edit server form', async ({ page }) => {
     const settingsUrl = 'file://' + path.resolve('test/harness/settings.html');
     await page.setViewportSize({ width: 860, height: 820 });
