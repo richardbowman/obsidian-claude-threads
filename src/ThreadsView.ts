@@ -1478,13 +1478,18 @@ export class ThreadsView extends ItemView {
    * system browser. When `forceExternal` is set (Cmd/Ctrl-click), always use the
    * system browser. See {@link openUrlPreferringWebViewer}.
    */
-  private openLink(url: string, forceExternal = false): void {
+  private async openLink(url: string, forceExternal = false): Promise<void> {
     const webViewerEnabled = !forceExternal && isWebViewerEnabled(this.app);
+    if (webViewerEnabled && this.plugin.isConversationFirst()) {
+      try {
+        await this.plugin.contextPanel.setViewState({ type: 'webviewer', active: true, state: { url } });
+      } catch (error) {
+        new Notice(`Could not open contextual link: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
     openUrlPreferringWebViewer(this.app, url, {
       webViewerEnabled,
-      destinationLeaf: webViewerEnabled && this.plugin.isConversationFirst()
-        ? this.plugin.contextPanel.getLeaf()
-        : undefined,
       openExternal: (u) => {
         const { shell } = require('electron') as { shell: { openExternal: (url: string) => void } };
         shell.openExternal(u);
