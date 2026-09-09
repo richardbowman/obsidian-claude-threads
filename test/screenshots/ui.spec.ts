@@ -52,6 +52,10 @@ test.describe('Agent Threads UI', () => {
     await page.getByRole('button', { name: 'Rename thread', exact: true }).click();
     await expect(input).toHaveValue('Fix auth middleware');
     await shot(page.locator('#app').locator('..'), 'rename-thread.png');
+    await input.fill('Cancelled before first edit');
+    await input.press('Escape');
+    expect(await page.evaluate(() => (window as any).__manager.getThread((window as any).__view.getActiveThreadId()).titleUserSet)).toBeFalsy();
+    await page.locator('.view-header-title').dblclick();
     await input.fill('First name');
     const saves = await page.evaluate(() => (window as any).__saveSettingsCalls ?? 0);
     await input.press('Enter');
@@ -78,6 +82,24 @@ test.describe('Agent Threads UI', () => {
     await page.locator('.ct-title-btn').dblclick();
     await expect(input).toHaveValue('Third name');
     await input.press('Escape');
+  });
+
+  test('thread rename fits a mobile viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${harnessUrl}?mobile`);
+    await page.waitForSelector('.ct-messages');
+    await page.locator('.ct-title-btn').click();
+    await page.getByRole('button', { name: 'Rename current thread' }).click();
+    const input = page.getByRole('textbox', { name: 'Thread name', exact: true });
+    await expect(input).toBeVisible();
+    const bounds = await input.boundingBox();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+    expect(bounds!.height).toBeGreaterThanOrEqual(44);
+    await shot(page.locator('.modal-overlay'), 'rename-thread-mobile.png');
+    await input.fill('Mobile thread name');
+    await page.getByRole('button', { name: 'Rename', exact: true }).click();
+    await expect(page.locator('.ct-title-text').first()).toHaveText('Mobile thread name');
   });
 
   test('document pane uses the native header and adapts when moved to a sidebar', async ({ page }) => {

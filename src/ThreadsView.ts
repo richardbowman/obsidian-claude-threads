@@ -6192,11 +6192,13 @@ export class ThreadsView extends ItemView {
     this.closeSwitcherPanel();
     new RenameThreadModal(this.app, thread.title, async (title) => {
       const current = this.manager.getThread(id);
-      if (!current || title === current.title) return;
-      current.titleUserSet = true;
-      this.manager.renameThread(id, title);
-      this.renderTitleBar();
-      if (id === this.activeThreadId) this.refreshLeafHeader();
+      if (!current) return;
+      if (title !== current.title) {
+        current.titleUserSet = true;
+        this.manager.renameThread(id, title);
+        this.renderTitleBar();
+        if (id === this.activeThreadId) this.refreshLeafHeader();
+      }
       await this.plugin.saveSettings();
     }).open();
   }
@@ -6209,6 +6211,7 @@ class RenameThreadModal extends Modal {
 
   onOpen(): void {
     this.titleEl.setText('Rename thread');
+    this.contentEl.addClass('ct-rename-thread-modal');
     const input = this.contentEl.createEl('input', {
       cls: 'ct-title-rename-input',
       attr: { type: 'text', 'aria-label': 'Thread name' },
