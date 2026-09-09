@@ -20,7 +20,9 @@ describe('Google Workspace native HTTPS transport', () => {
     try {
       const signal = new AbortController().signal;
       const response = await googleWorkspaceRequest('https://docsmcp.googleapis.com/mcp/v1', { method: 'POST', headers: { Authorization: 'Bearer test' }, body: 'payload', signal });
-      expect(await response.text()).toBe('data: {"result":{}}\n\n');
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of response.body as AsyncIterable<Uint8Array>) chunks.push(chunk);
+      expect(Buffer.concat(chunks).toString()).toBe('data: {"result":{}}\n\n');
       expect(request.write).toHaveBeenCalledWith('payload');
       expect(native.request).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal, method: 'POST' }), expect.any(Function));
       expect(renderer).not.toHaveBeenCalled();

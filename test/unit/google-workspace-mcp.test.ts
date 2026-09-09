@@ -157,4 +157,29 @@ describe('Google Workspace MCP connection', () => {
     expect((await call(proxy.serversForThread('thread')['google-docs'])).status).toBe(502);
     expect(f.fetchUpstream).not.toHaveBeenCalled();
   });
+  it('keeps the same connection and initial service selection after reload', async () => {
+    const f = setup(); const persistence = { bindings: {}, save: async () => {} };
+    const first = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, persistence); instances.push(first);
+    await first.configure({ docs: true }); const prior = first.serversForThread('thread')['google-docs'];
+    await call(prior); first.close();
+    const second = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, persistence); instances.push(second);
+    await second.configure({ docs: true, slides: true }); const servers = second.serversForThread('thread');
+    expect(Object.keys(servers)).toEqual(['google-docs']); expect(servers['google-docs'].headers).not.toEqual(prior.headers);
+    expect((await call(servers['google-docs'])).status).toBe(200);
+  });
+  it('contains storage failures while disabling instead of failing plugin startup', async () => {
+    const f = setup(); const persistence = { bindings: { thread: { fingerprint: 'old', services: ['docs' as const] } }, save: async () => { throw new Error('storage'); } };
+    const proxy = new GoogleWorkspaceMcp(() => f.plugin, f.fetchUpstream, 30000, persistence); instances.push(proxy);
+    await expect(proxy.configure({ docs: false })).resolves.toBeUndefined();
+    expect(proxy.status()).toContain('could not be saved');
+  });
+  it('does not forward a queued request after its thread is removed', async () => {
+    const f = setup(); await f.proxy.configure({ docs: true });
+    let release!: (token: string) => void;
+    f.plugin.tokenStore.getValidAccessToken.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const pending = call(f.proxy.serversForThread('thread')['google-docs']);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    f.proxy.retainThreads(new Set()); release('GOOGLE_SECRET');
+    expect((await pending).status).toBe(409); expect(f.fetchUpstream).not.toHaveBeenCalled();
+  });
 });

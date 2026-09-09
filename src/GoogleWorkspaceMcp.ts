@@ -2,7 +2,6 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, randomBytes } from 'crypto';
 import { once } from 'events';
 import { request as httpsRequest } from 'https';
-import { Readable } from 'stream';
 
 export const GOOGLE_SERVICES = ['docs', 'drive', 'sheets', 'slides'] as const;
 type Service = typeof GOOGLE_SERVICES[number];
@@ -26,7 +25,12 @@ interface Binding {
 }
 export interface GoogleWorkspaceBinding { fingerprint: string; services: Service[]; revoked?: boolean }
 interface Persistence { bindings: Record<string, GoogleWorkspaceBinding>; save(): Promise<void> }
-type Upstream = (url: string, options: RequestInit) => Promise<Response>;
+interface UpstreamResponse {
+  status: number;
+  headers: { get(name: string): string | null };
+  body: AsyncIterable<Uint8Array> | ReadableStream<Uint8Array> | null;
+}
+type Upstream = (url: string, options: RequestInit) => Promise<UpstreamResponse>;
 type Config = { type: 'http'; url: string; headers: Record<string, string> };
 const requestHeaders = ['accept', 'content-type', 'mcp-protocol-version', 'mcp-session-id', 'last-event-id'];
 const responseHeaders = ['content-type', 'content-encoding', 'mcp-session-id', 'mcp-protocol-version', 'retry-after', 'cache-control'];
@@ -40,9 +44,9 @@ export const googleWorkspaceRequest: Upstream = (url, options) => new Promise((r
     for (const [key, value] of Object.entries(incoming.headers)) {
       if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
     }
-    const body = [204, 205, 304].includes(status) ? null : Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>;
+    const body = [204, 205, 304].includes(status) ? null : incoming;
     if (!body) incoming.resume();
-    resolve(new Response(body, { status, headers }));
+    resolve({ body, status, headers });
   });
   request.on('error', reject);
   if (options.body) request.write(options.body);
@@ -91,7 +95,12 @@ export class GoogleWorkspaceMcp {
     for (const binding of Object.values(this.persistence.bindings)) {
       if (Array.isArray(binding.services) && binding.services.some(service => !this.enabled[service]) && !binding.revoked) { binding.revoked = true; changed = true; }
     }
-    if (changed) await this.persistence.save();
+    if (changed) {
+      try { await this.persistence.save(); } catch {
+        this.lastFailure = 'Google connection changes could not be saved. Check vault storage.';
+        return;
+      }
+    }
     if (this.closed || !GOOGLE_SERVICES.some(service => selection[service]) || this.server?.listening) return;
     if (this.starting) return this.starting;
     this.starting = new Promise<void>((resolve) => {
