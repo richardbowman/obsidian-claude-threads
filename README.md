@@ -465,7 +465,7 @@ Threads does not implement a separate set of Google tools. Interactive and newly
 scheduled threads inherit the same selection on Claude and Codex, with their
 existing permission behavior.
 
-Install and connect Google Docs Sync first. This integration requires its guarded
+Install and connect **Google Docs Sync v0.7.1 or later** first. This integration requires its guarded
 connection refresh support (`tokenStore.supportsConnectionGuard`); older builds
 show an update instruction. The auth service must request the Docs, Drive, Sheets,
 and Slides scopes. After updating the auth service, disconnect and reconnect
@@ -487,7 +487,9 @@ changing auth hosts, or refresh-token rotation requires a new thread; ordinary
 access-token refresh remains automatic. Google may report missing scopes, service
 enablement, document access, or preview enrollment during discovery/tool calls.
 The transport forwards these errors without pretending that initialization alone
-validates access. Corporate live validation of all four services remains pending.
+validates access. This is an opt-in beta: corporate live validation of all four
+services remains pending. For a self-hosted auth service, update its deployment
+with the expanded Workspace scopes before reconnecting Google Docs Sync.
 
 #### Custom servers
 
