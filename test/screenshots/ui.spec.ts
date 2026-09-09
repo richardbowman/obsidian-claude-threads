@@ -1995,6 +1995,9 @@ test.describe('Agent Threads UI', () => {
     }
     await expect(page.locator('.ct-task-row-completed')).toHaveCount(4);
     await expect(page.locator('.ct-task-row-in_progress')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => (window as any).__view.getActiveThreadId())).toBe('thread-tasks');
+    // Capture the intended bottom after async rendering and composer expansion.
+    await anchorFocusedComposerToBottom(page);
     await shot(page, 'task-list-card.png', { fullPage: true });
 
     // Collapse on header click
@@ -2022,6 +2025,8 @@ test.describe('Agent Threads UI', () => {
     // Four pills, in order, with the PR pill rendered.
     await expect(page.locator('.ct-footer-pill')).toHaveCount(4);
     await expect(page.locator('.ct-footer-pill-warn')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => (window as any).__view.getActiveThreadId())).toBe('thread-brainstorm');
+    await anchorFocusedComposerToBottom(page);
     await shot(page, 'status-line-tags.png', { fullPage: true });
   });
 
@@ -2999,6 +3004,8 @@ test.describe('Agent Threads UI', () => {
     await expect(page.locator('.ct-proposed-reply-edit')).toBeVisible();
     await expect(page.locator('.ct-proposed-reply-discard')).toBeVisible();
     await expect(page.locator('.ct-proposed-reply-label')).toHaveText('Proposed reply');
+    await expect.poll(() => page.evaluate(() => (window as any).__view.getActiveThreadId())).toBe('thread-proposed-reply');
+    await anchorFocusedComposerToBottom(page);
     await shot(page, 'proposed-reply-card.png', { fullPage: true });
   });
 
