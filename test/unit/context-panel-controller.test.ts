@@ -149,6 +149,13 @@ describe('ContextPanelController', () => {
     expect(h.workspace.revealLeaf).not.toHaveBeenCalled();
   });
 
+  it('distinguishes native view failures from controller cancellation', async () => {
+    const h = durableHarness();
+    h.destination.setViewState.mockRejectedValue(new Error('view failed'));
+    await expect(h.controller.setViewState({ type: 'webviewer', state: {} })).rejects.toMatchObject({ name: 'ContextPanelViewError' });
+    expect(h.workspace.revealLeaf).not.toHaveBeenCalled();
+  });
+
   it('creates one right-adjacent companion and reuses it for later files', async () => {
     const { controller, workspace, chat, firstCompanion } = makeHarness();
     const firstFile = { path: 'Notes/first.md' } as TFile;

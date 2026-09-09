@@ -10,6 +10,14 @@ export function createCompanionOwnershipStore(): CompanionOwnershipStore { retur
 const defaultOwnershipStore = createCompanionOwnershipStore();
 function createMarker(): string { return `ct-companion-${crypto.randomUUID()}`; }
 
+/** Allows URL callers to preserve external fallback only for native view failures. */
+export class ContextPanelViewError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'ContextPanelViewError';
+  }
+}
+
 export class ContextPanelController {
   private disposed = false;
   private companionLeaf: WorkspaceLeaf | null = null;
@@ -94,7 +102,12 @@ export class ContextPanelController {
     const { leaf, reused } = this.acquireLeaf();
     await this.ensureMarkerPersisted();
     this.assertActive();
-    await leaf.setViewState(viewState);
+    try {
+      await leaf.setViewState(viewState);
+    } catch (error) {
+      this.assertActive();
+      throw new ContextPanelViewError(error);
+    }
     this.assertActive();
     this.app.workspace.revealLeaf(leaf);
     return reused;

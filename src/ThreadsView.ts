@@ -24,6 +24,7 @@ import { buildComposerContextLabel, formatWakeupCountdown, isAwsSsoError, extrac
 import { getVaultBridgesAPI, mapToVaultPath, type BridgeInfo } from './bridgeUtils';
 import { resolveTagIcon, planFooter, derivePrUrl } from './statusLine';
 import { isWebViewerEnabled } from './SettingsTab';
+import { ContextPanelViewError } from './ContextPanelController';
 import { classifyRenderedMarkdownLink, isOsAbsoluteHref, openUrlPreferringWebViewer, resolveAbsoluteVaultHref } from './linkUtils';
 import type { StatusTag } from './types';
 import { appendOrchestratorBadge } from './orchestrator-badge';
@@ -1479,14 +1480,18 @@ export class ThreadsView extends ItemView {
    * system browser. See {@link openUrlPreferringWebViewer}.
    */
   private async openLink(url: string, forceExternal = false): Promise<void> {
-    const webViewerEnabled = !forceExternal && isWebViewerEnabled(this.app);
+    let webViewerEnabled = !forceExternal && isWebViewerEnabled(this.app);
     if (webViewerEnabled && this.plugin.isConversationFirst()) {
       try {
         await this.plugin.contextPanel.setViewState({ type: 'webviewer', active: true, state: { url } });
+        return;
       } catch (error) {
-        new Notice(`Could not open contextual link: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof ContextPanelViewError) webViewerEnabled = false;
+        else {
+          new Notice(`Could not open contextual link: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
       }
-      return;
     }
     openUrlPreferringWebViewer(this.app, url, {
       webViewerEnabled,
