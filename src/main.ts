@@ -243,6 +243,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
   gitDiff: import('./GitDiffService').GitDiffService | null = null;
   orchestratorWakeup: import('./OrchestratorWakeup').OrchestratorWakeup | null = null;
   contextPanel!: ContextPanelController;
+  googleWorkspaceMcp?: import('./GoogleWorkspaceMcp').GoogleWorkspaceMcp;
 
   /**
    * MCP-server warnings already shown as a Notice this plugin load, so a
@@ -381,6 +382,14 @@ export default class ClaudeThreadsPlugin extends Plugin {
     const { resolveMcpServers } = require('./mcpServerStore') as typeof import('./mcpServerStore');
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const skillPaths = require('./skillPaths') as typeof import('./skillPaths');
+
+    const { GoogleWorkspaceMcp } = require('./GoogleWorkspaceMcp') as typeof import('./GoogleWorkspaceMcp');
+    this.settings.googleWorkspaceBindings ??= {};
+    this.googleWorkspaceMcp = new GoogleWorkspaceMcp(() =>
+      (this.app as unknown as { plugins?: { getPlugin(id: string): unknown } }).plugins?.getPlugin('obsidian-gdocs-sync'), undefined, undefined,
+      { bindings: this.settings.googleWorkspaceBindings, save: () => this.saveSettings() });
+    await this.googleWorkspaceMcp.configure(this.settings.googleWorkspaceMcp ?? {});
+    this.register(() => this.googleWorkspaceMcp?.close());
 
     // Resolve the skill roots before anything reads them. Everything the plugin
     // installs goes under <vault>/<plugin-dir>/skills/; ~/.claude/ is scanned
@@ -733,7 +742,12 @@ export default class ClaudeThreadsPlugin extends Plugin {
         }
         this.reportMcpWarnings(warnings);
 
-        return mergeMcpServers(mcpServers, externalMcps);
+        const googleMcps = this.googleWorkspaceMcp?.serversForThread(threadId) ?? {};
+        if (Object.values(this.settings.googleWorkspaceMcp ?? {}).some(Boolean) && !Object.keys(googleMcps).length) {
+          this.reportMcpWarnings([this.googleWorkspaceMcp?.status() ?? 'Google Workspace is unavailable. Check Settings → MCP.']);
+        }
+        return mergeMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(
+          mergeMcpServers<import('@anthropic-ai/claude-agent-sdk').McpServerConfig>(mcpServers, googleMcps), externalMcps);
       } catch (err) {
         console.error('[ClaudeThreads] Failed to create built-in MCP servers:', err);
         return {} as Record<string, McpServerConfig>;
@@ -796,6 +810,9 @@ export default class ClaudeThreadsPlugin extends Plugin {
       }
     });
     this.register(unsubStatus);
+    this.register(this.manager.subscribe(() => {
+      this.googleWorkspaceMcp?.retainThreads(new Set(this.manager.getThreads().filter(thread => thread.status !== 'archived').map(thread => thread.id)));
+    }));
 
     // AgentRun state is a crash-recovery record, so persist every lifecycle
     // projection while the parent turn is still active. Waiting for done/error
@@ -1833,6 +1850,7 @@ export default class ClaudeThreadsPlugin extends Plugin {
     // independently fire the same due item. Destroying synchronously here closes
     // that race window immediately, regardless of how long thread shutdown takes.
     this.scheduler?.destroy();
+    this.googleWorkspaceMcp?.close();
 
     // ── Safe-reload guard ────────────────────────────────────────────────────
     // If any agent threads are actively running, interrupt them and wait up to

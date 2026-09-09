@@ -2443,6 +2443,26 @@ export class ClaudeThreadsSettingTab extends PluginSettingTab {
       require('./mcpServerStore') as typeof import('./mcpServerStore');
 
     containerEl.createEl('h2', { text: 'MCP Servers' });
+    containerEl.createEl('h3', { text: 'Google Workspace' });
+    const googleStatus = containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: this.plugin.googleWorkspaceMcp?.status() ?? 'Google Workspace requires desktop Google Docs Sync with a connected account.',
+    });
+    containerEl.createEl('p', {
+      cls: 'setting-item-description',
+      text: 'Enable Google-provided read and write tools using your Google Docs Sync connection. Selected services apply to new threads, including scheduled threads. Disabling a service revokes existing Google connections. After reconnecting, changing auth hosts, or token rotation, start a new thread. Google Workspace Developer Preview enrollment and service APIs are required.',
+    });
+    for (const [service, label] of [['docs', 'Google Docs'], ['drive', 'Google Drive'], ['sheets', 'Google Sheets'], ['slides', 'Google Slides']] as const) {
+      new Setting(containerEl).setName(label).addToggle(toggle => toggle
+        .setValue(this.plugin.settings.googleWorkspaceMcp?.[service] === true)
+        .onChange(async enabled => {
+          this.plugin.settings.googleWorkspaceMcp = { ...this.plugin.settings.googleWorkspaceMcp, [service]: enabled };
+          await this.plugin.saveSettings();
+          await this.plugin.googleWorkspaceMcp?.configure(this.plugin.settings.googleWorkspaceMcp);
+          googleStatus.setText(this.plugin.googleWorkspaceMcp?.status() ?? 'Google Workspace requires desktop Google Docs Sync with a connected account.');
+        }));
+    }
+    containerEl.createEl('h3', { text: 'Custom MCP servers' });
     containerEl.createEl('p', {
       cls: 'setting-item-description',
       text:
